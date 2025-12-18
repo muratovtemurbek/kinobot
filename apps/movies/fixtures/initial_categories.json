@@ -1,0 +1,90 @@
+[
+  {
+    "model": "movies.category",
+    "pk": 1,
+    "fields": {
+      "name": "Jangari",
+      "emoji": "💥",
+      "slug": "action",
+      "order": 1,
+      "is_active": true
+    }
+  },
+  {
+    "model": "movies.category",
+    "pk": 2,
+    "fields": {
+      "name": "Komediya",
+      "emoji": "😂",
+      "slug": "comedy",
+      "order": 2,
+      "is_active": true
+    }
+  },
+  {
+    "model": "movies.category",
+    "pk": 3,
+    "fields": {
+      "name": "Drama",
+      "emoji": "🎭",
+      "slug": "drama",
+      "order": 3,
+      "is_active": true
+    }
+  },
+  {
+    "model": "movies.category",
+    "pk": 4,
+    "fields": {
+      "name": "Fantastika",
+      "emoji": "🚀",
+      "slug": "scifi",
+      "order": 4,
+      "is_active": true
+    }
+  },
+  {
+    "model": "movies.category",
+    "pk": 5,
+    "fields": {
+      "name": "Romantika",
+      "emoji": "💕",
+      "slug": "romance",
+      "order": 5,
+      "is_active": true
+    }
+  },
+  {
+    "model": "movies.category",
+    "pk": 6,
+    "fields": {
+      "name": "Qo'rqinchli",
+      "emoji": "👻",
+      "slug": "horror",
+      "order": 6,
+      "is_active": true
+    }
+  },
+  {
+    "model": "movies.category",
+    "pk": 7,
+    "fields": {
+      "name": "Animatsiya",
+      "emoji": "🎬",
+      "slug": "animation",
+      "order": 7,
+      "is_active": true
+    }
+  },
+  {
+    "model": "movies.category",
+    "pk": 8,
+    "fields": {
+      "name": "Hujjatli",
+      "emoji": "📹",
+      "slug": "documentary",
+      "order": 8,
+      "is_active": true
+    }
+  }
+]

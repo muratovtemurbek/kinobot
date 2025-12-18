@@ -1,0 +1,38 @@
+[
+  {
+    "model": "payments.tariff",
+    "pk": 1,
+    "fields": {
+      "name": "10 kunlik",
+      "days": 10,
+      "price": 6000,
+      "discounted_price": 3000,
+      "order": 1,
+      "is_active": true
+    }
+  },
+  {
+    "model": "payments.tariff",
+    "pk": 2,
+    "fields": {
+      "name": "20 kunlik",
+      "days": 20,
+      "price": 8000,
+      "discounted_price": 4000,
+      "order": 2,
+      "is_active": true
+    }
+  },
+  {
+    "model": "payments.tariff",
+    "pk": 3,
+    "fields": {
+      "name": "30 kunlik",
+      "days": 30,
+      "price": 10000,
+      "discounted_price": 5000,
+      "order": 3,
+      "is_active": true
+    }
+  }
+]

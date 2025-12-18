@@ -1,0 +1,19 @@
+# Django
+Django>=5.0,<6.0
+gunicorn>=21.0.0
+psycopg2-binary>=2.9.9
+whitenoise>=6.6.0
+dj-database-url>=2.1.0
+
+# Aiogram
+aiogram>=3.4.0
+
+# Redis
+redis>=5.0.0
+
+# Utils
+python-dotenv>=1.0.0
+cachetools>=5.3.0
+
+# Async
+asgiref>=3.7.0

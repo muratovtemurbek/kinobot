@@ -1,0 +1,123 @@
+from typing import Callable, Dict, Any, Awaitable
+from aiogram import BaseMiddleware, Bot
+from aiogram.types import TelegramObject, Message, CallbackQuery
+from aiogram.exceptions import TelegramBadRequest
+from asgiref.sync import sync_to_async
+from cachetools import TTLCache
+from django.conf import settings
+
+# Cache for channels and user subscriptions
+_channels_cache = TTLCache(maxsize=1, ttl=300)
+_subscription_cache = TTLCache(maxsize=5000, ttl=30)
+
+
+class SubscriptionMiddleware(BaseMiddleware):
+    """Majburiy obuna middleware - optimized"""
+
+    SKIP_COMMANDS = {'/start', '/help', '/admin'}
+    SKIP_CALLBACKS = {'check_subscription', 'admin:panel', 'admin:stats', 'admin:movies',
+                      'admin:add_movie', 'admin:channels', 'admin:users', 'admin:payments',
+                      'admin:settings', 'admin:broadcast'}
+
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: Dict[str, Any]
+    ) -> Any:
+        db_user = data.get('db_user')
+
+        # Get user_id
+        user_id = None
+        if isinstance(event, Message):
+            user_id = event.from_user.id
+        elif isinstance(event, CallbackQuery):
+            user_id = event.from_user.id
+
+        # Admin users skip subscription check
+        if user_id and user_id in settings.ADMINS:
+            return await handler(event, data)
+
+        # Premium users skip
+        if db_user and db_user.is_premium_active:
+            return await handler(event, data)
+
+        # Skip commands/callbacks
+        if isinstance(event, Message):
+            if event.text and event.text.split()[0] in self.SKIP_COMMANDS:
+                return await handler(event, data)
+        elif isinstance(event, CallbackQuery):
+            if event.data in self.SKIP_CALLBACKS or event.data.startswith('admin:'):
+                return await handler(event, data)
+
+        if user_id:
+            # Check subscription with cache
+            cache_key = f"sub_{user_id}"
+
+            if cache_key in _subscription_cache:
+                not_subscribed = _subscription_cache[cache_key]
+            else:
+                bot: Bot = data['bot']
+                not_subscribed = await self._check_subscription(bot, user_id)
+                _subscription_cache[cache_key] = not_subscribed
+
+            if not_subscribed:
+                from bot.keyboards import channels_kb
+                text = (
+                    "📢 <b>Botdan foydalanish uchun kanallarga obuna bo'ling:</b>\n\n"
+                    "Obuna bo'lgach, <b>✅ Tekshirish</b> tugmasini bosing."
+                )
+
+                if isinstance(event, Message):
+                    await event.answer(text, reply_markup=channels_kb(not_subscribed))
+                elif isinstance(event, CallbackQuery):
+                    await event.message.answer(text, reply_markup=channels_kb(not_subscribed))
+                    await event.answer()
+                return
+
+        return await handler(event, data)
+
+    async def _check_subscription(self, bot: Bot, user_id: int) -> list:
+        """Check subscription - fast"""
+        channels = await self._get_channels_cached()
+        not_subscribed = []
+
+        for channel in channels:
+            if not channel.is_checkable:
+                continue
+
+            try:
+                member = await bot.get_chat_member(channel.channel_id, user_id)
+                if member.status in ['left', 'kicked']:
+                    not_subscribed.append(channel)
+            except TelegramBadRequest:
+                pass
+
+        return not_subscribed
+
+    async def _get_channels_cached(self):
+        """Get channels with cache"""
+        if 'channels' in _channels_cache:
+            return _channels_cache['channels']
+
+        channels = await self._get_channels_db()
+        _channels_cache['channels'] = channels
+        return channels
+
+    @sync_to_async
+    def _get_channels_db(self):
+        from apps.channels.models import Channel
+        return list(Channel.objects.filter(is_active=True).order_by('order'))
+
+
+def clear_subscription_cache(user_id: int = None):
+    """Clear subscription cache"""
+    if user_id:
+        _subscription_cache.pop(f"sub_{user_id}", None)
+    else:
+        _subscription_cache.clear()
+
+
+def clear_channels_cache():
+    """Clear channels cache"""
+    _channels_cache.clear()
