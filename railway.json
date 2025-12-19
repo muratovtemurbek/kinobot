@@ -6,7 +6,7 @@
   },
   "deploy": {
     "startCommand": "python manage.py migrate && python manage.py collectstatic --noinput && python start.py",
-    "healthcheckPath": "/admin/",
+    "healthcheckPath": "/health/",
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 10
   }
