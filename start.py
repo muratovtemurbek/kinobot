@@ -48,13 +48,19 @@ if __name__ == '__main__':
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    # Run gunicorn in a separate thread
-    gunicorn_thread = threading.Thread(target=run_gunicorn, daemon=True)
+    # Run gunicorn in a separate thread (daemon=False so it keeps running)
+    gunicorn_thread = threading.Thread(target=run_gunicorn, daemon=False)
     gunicorn_thread.start()
 
     print("Starting services...")
     print(f"Django running on port {PORT}")
     print("Telegram bot starting...")
 
-    # Run bot in main thread
-    run_bot()
+    # Run bot in main thread with error handling
+    try:
+        run_bot()
+    except Exception as e:
+        print(f"Bot error: {e}")
+        print("Bot failed but Django will continue running...")
+        # Keep the process alive for Django
+        gunicorn_thread.join()
