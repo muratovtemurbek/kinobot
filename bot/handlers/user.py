@@ -265,11 +265,16 @@ async def get_movie_by_code(message: Message, db_user: User = None, bot: Bot = N
 @router.callback_query(F.data == "search")
 async def search_callback(callback: CallbackQuery):
     """Qidirish"""
+    # Bot sozlamalaridan kanal linkini olish
+    bot_settings = await get_bot_settings()
+    channel_link = bot_settings.channel_link if bot_settings else None
+    channel_name = bot_settings.channel_name if bot_settings else None
+
     await callback.message.edit_text(
         "🔍 <b>Kino qidirish</b>\n\n"
         "Kino kodini yuboring yoki filter tanlang:\n"
         "Masalan: <code>123</code>",
-        reply_markup=search_filter_kb()
+        reply_markup=search_filter_kb(channel_link=channel_link, channel_name=channel_name)
     )
     await callback.answer()
 

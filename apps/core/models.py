@@ -32,6 +32,10 @@ class BotSettings(models.Model):
     # Admin
     admin_contact = models.CharField(max_length=100, blank=True, default='', verbose_name='Admin kontakt')
 
+    # Kanal link (Kino qidirish sahifasida ko'rinadi)
+    channel_link = models.URLField(max_length=200, blank=True, default='', verbose_name='Kanal linki')
+    channel_name = models.CharField(max_length=100, blank=True, default='Bizning kanal', verbose_name='Kanal nomi')
+
     class Meta:
         verbose_name = 'Bot sozlamalari'
         verbose_name_plural = 'Bot sozlamalari'

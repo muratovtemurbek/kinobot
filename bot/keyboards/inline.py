@@ -352,15 +352,28 @@ def cancel_inline_kb() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def search_filter_kb() -> InlineKeyboardMarkup:
+def search_filter_kb(channel_link: str = None, channel_name: str = None) -> InlineKeyboardMarkup:
     """Qidiruv filtrlari"""
     builder = InlineKeyboardBuilder()
 
-    builder.row(InlineKeyboardButton(text="📂 Janr bo'yicha", callback_data="filter:category"))
-    builder.row(InlineKeyboardButton(text="🌍 Davlat bo'yicha", callback_data="filter:country"))
-    builder.row(InlineKeyboardButton(text="🌐 Til bo'yicha", callback_data="filter:language"))
-    builder.row(InlineKeyboardButton(text="📅 Yil bo'yicha", callback_data="filter:year"))
+    builder.row(InlineKeyboardButton(text="🎬 Barcha kinolar", callback_data="all_movies"))
+    builder.row(
+        InlineKeyboardButton(text="📂 Janr", callback_data="filter:category"),
+        InlineKeyboardButton(text="🌍 Davlat", callback_data="filter:country")
+    )
+    builder.row(
+        InlineKeyboardButton(text="🌐 Til", callback_data="filter:language"),
+        InlineKeyboardButton(text="📅 Yil", callback_data="filter:year")
+    )
     builder.row(InlineKeyboardButton(text="🎲 Tasodifiy kino", callback_data="random_movie"))
+
+    # Kanal linki (agar mavjud bo'lsa)
+    if channel_link:
+        builder.row(InlineKeyboardButton(
+            text=f"📢 {channel_name or 'Bizning kanal'}",
+            url=channel_link
+        ))
+
     builder.row(InlineKeyboardButton(text="🏠 Bosh menyu", callback_data="back_to_menu"))
 
     return builder.as_markup()
