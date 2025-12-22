@@ -8,6 +8,7 @@ def health_check(request):
     return HttpResponse("ok")
 
 urlpatterns = [
+    path('', health_check, name='root_health'),
     path('health/', health_check, name='health'),
     path('admin/', admin.site.urls),
 ]

@@ -4,9 +4,9 @@ import logging
 from aiogram.types import BotCommand, BotCommandScopeChat, BotCommandScopeDefault
 from django.conf import settings
 
-from loader import bot, dp
-from handlers import router
-from middlewares import DatabaseMiddleware, SubscriptionMiddleware, ThrottlingMiddleware
+from bot.loader import bot, dp
+from bot.handlers import router
+from bot.middlewares import DatabaseMiddleware, SubscriptionMiddleware, ThrottlingMiddleware
 
 # Logging
 logging.basicConfig(
@@ -63,7 +63,7 @@ async def on_startup():
     logger.info("Bot buyruqlari o'rnatildi!")
 
     # Premium scheduler ni ishga tushirish (background task)
-    from utils.scheduler import start_scheduler
+    from bot.utils.scheduler import start_scheduler
     asyncio.create_task(start_scheduler(bot, check_interval=3600))  # Har 1 soatda tekshirish
     logger.info("Premium scheduler ishga tushdi!")
 

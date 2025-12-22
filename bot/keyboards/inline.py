@@ -8,21 +8,10 @@ def main_menu_inline_kb(is_admin: bool = False) -> InlineKeyboardMarkup:
 
     builder.row(InlineKeyboardButton(text="🔍 Kino qidirish", callback_data="search"))
     builder.row(
-        InlineKeyboardButton(text="📂 Kategoriyalar", callback_data="categories"),
-        InlineKeyboardButton(text="🎬 Barcha kinolar", callback_data="all_movies")
-    )
-    builder.row(
-        InlineKeyboardButton(text="🔥 Top 10", callback_data="top_movies"),
-        InlineKeyboardButton(text="🆕 Yangilar", callback_data="new_movies")
-    )
-    builder.row(
-        InlineKeyboardButton(text="🎲 Random", callback_data="random_movie"),
-        InlineKeyboardButton(text="❤️ Saqlangan", callback_data="saved_movies")
-    )
-    builder.row(
-        InlineKeyboardButton(text="💎 Premium", callback_data="premium"),
+        InlineKeyboardButton(text="🔥 Top filmlar", callback_data="top_movies"),
         InlineKeyboardButton(text="👤 Profil", callback_data="profile")
     )
+    builder.row(InlineKeyboardButton(text="💎 Premium olish", callback_data="premium"))
 
     # Admin tugmasi
     if is_admin:
