@@ -48,15 +48,32 @@ if __name__ == '__main__':
         '--error-logfile', '-',
     ])
 
-    # Wait for gunicorn to start
-    time.sleep(3)
+    # Wait for gunicorn to start and verify health
+    import urllib.request
+    import urllib.error
 
-    # Check if gunicorn is running
-    if gunicorn_process.poll() is not None:
-        print("ERROR: Gunicorn failed to start!")
-        sys.exit(1)
+    max_retries = 30
+    for i in range(max_retries):
+        time.sleep(1)
 
-    print("Gunicorn started successfully!")
+        # Check if gunicorn process is still running
+        if gunicorn_process.poll() is not None:
+            print("ERROR: Gunicorn failed to start!")
+            sys.exit(1)
+
+        # Try to connect to health endpoint
+        try:
+            response = urllib.request.urlopen(f'http://127.0.0.1:{PORT}/health/', timeout=2)
+            if response.status == 200:
+                print(f"Gunicorn started successfully after {i+1} seconds!")
+                break
+        except (urllib.error.URLError, urllib.error.HTTPError, Exception):
+            if i < max_retries - 1:
+                print(f"Waiting for gunicorn... ({i+1}/{max_retries})")
+            else:
+                print("WARNING: Could not verify health endpoint, continuing anyway...")
+    else:
+        print("Gunicorn may not be ready, but continuing...")
 
     # Start bot
     print("Starting Telegram bot...")
