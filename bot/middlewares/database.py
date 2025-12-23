@@ -4,11 +4,13 @@ from aiogram.types import TelegramObject, Message, CallbackQuery
 from asgiref.sync import sync_to_async
 from django.utils import timezone
 from django.core.cache import cache
+from django.conf import settings as django_settings
 from cachetools import TTLCache
 
 # Local cache for faster access
 _user_cache = TTLCache(maxsize=1000, ttl=60)
 _settings_cache = TTLCache(maxsize=1, ttl=300)
+_admin_cache = TTLCache(maxsize=100, ttl=300)
 
 
 class DatabaseMiddleware(BaseMiddleware):
@@ -31,12 +33,15 @@ class DatabaseMiddleware(BaseMiddleware):
             settings = await self._get_settings_cached()
 
             if not settings.is_active:
-                msg = settings.maintenance_message or "Bot texnik ishlar sababli to'xtatilgan."
-                if isinstance(event, Message):
-                    await event.answer(msg)
-                elif isinstance(event, CallbackQuery):
-                    await event.answer(msg, show_alert=True)
-                return
+                # Admin tekshirish - adminlar bot o'chirilgan bo'lsa ham ishlata oladi
+                is_admin = await self._is_admin_cached(user.id)
+                if not is_admin:
+                    msg = settings.maintenance_message or "Bot texnik ishlar sababli to'xtatilgan."
+                    if isinstance(event, Message):
+                        await event.answer(msg)
+                    elif isinstance(event, CallbackQuery):
+                        await event.answer(msg, show_alert=True)
+                    return
 
             # Fast user check from cache
             db_user = await self._get_user_cached(user.id)
@@ -77,6 +82,27 @@ class DatabaseMiddleware(BaseMiddleware):
         _settings_cache['settings'] = settings
         return settings
 
+    async def _is_admin_cached(self, user_id: int) -> bool:
+        """Check if user is admin with cache"""
+        # Settings.ADMINS ro'yxatini tekshirish
+        if user_id in django_settings.ADMINS:
+            return True
+
+        # Cache tekshirish
+        if user_id in _admin_cache:
+            return _admin_cache[user_id]
+
+        # Database tekshirish
+        is_admin = await self._check_admin_db(user_id)
+        _admin_cache[user_id] = is_admin
+        return is_admin
+
+    @sync_to_async
+    def _check_admin_db(self, user_id: int) -> bool:
+        """Check if user is admin in database"""
+        from apps.users.models import Admin
+        return Admin.objects.filter(user__user_id=user_id).exists()
+
     @sync_to_async
     def _get_user_db(self, user_id: int):
         from apps.users.models import User
@@ -102,3 +128,11 @@ def clear_user_cache(user_id: int = None):
 def clear_settings_cache():
     """Clear settings cache"""
     _settings_cache.clear()
+
+
+def clear_admin_cache(user_id: int = None):
+    """Clear admin cache"""
+    if user_id:
+        _admin_cache.pop(user_id, None)
+    else:
+        _admin_cache.clear()

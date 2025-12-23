@@ -7,7 +7,7 @@ from django.utils import timezone
 from django.conf import settings
 
 from apps.users.models import User
-from apps.payments.models import Tariff, Payment
+from apps.payments.models import Tariff, Payment, PendingPaymentSession
 from apps.core.models import BotSettings
 from bot.keyboards import tariffs_kb, main_menu_inline_kb, payment_confirm_kb, back_kb
 from bot.filters import CanManagePayments
@@ -216,24 +216,7 @@ async def reject_payment_callback(callback: CallbackQuery, bot: Bot):
 
 # ==================== HELPER FUNCTIONS ====================
 
-# In-memory pending payments storage with auto-cleanup
-_pending_payments = {}
-_PENDING_PAYMENT_TIMEOUT = 1800  # 30 daqiqa
-
-
-def _cleanup_old_pending_payments():
-    """Eski pending to'lovlarni tozalash (30 daqiqadan eski)"""
-    from datetime import datetime
-    now = timezone.now()
-    expired_keys = []
-
-    for user_id, data in _pending_payments.items():
-        if 'timestamp' in data:
-            if (now - data['timestamp']).total_seconds() > _PENDING_PAYMENT_TIMEOUT:
-                expired_keys.append(user_id)
-
-    for key in expired_keys:
-        del _pending_payments[key]
+_PENDING_PAYMENT_TIMEOUT = 1800  # 30 daqiqa (sekundlarda)
 
 
 @sync_to_async
@@ -305,42 +288,69 @@ def get_user_by_pk(pk: int):
         return None
 
 
-async def save_pending_payment(user_id: int, tariff_id: int, amount: int, with_discount: bool):
-    """Pending to'lovni saqlash"""
-    # Har safar saqlashdan oldin eski to'lovlarni tozalash
-    _cleanup_old_pending_payments()
+@sync_to_async
+def save_pending_payment(user_id: int, tariff_id: int, amount: int, with_discount: bool):
+    """Pending to'lovni database ga saqlash"""
+    # Eski sessiyalarni tozalash
+    PendingPaymentSession.cleanup_expired()
 
-    _pending_payments[user_id] = {
-        'tariff_id': tariff_id,
-        'amount': amount,
-        'with_discount': with_discount,
-        'timestamp': timezone.now()
-    }
+    # Eski sessiyani o'chirish (agar mavjud bo'lsa)
+    try:
+        user = User.objects.get(user_id=user_id)
+        PendingPaymentSession.objects.filter(user=user).delete()
 
-
-async def get_pending_payment(user_id: int):
-    """Pending to'lovni olish"""
-    # Eski to'lovlarni tozalash
-    _cleanup_old_pending_payments()
-
-    pending = _pending_payments.get(user_id)
-
-    # Agar 30 daqiqadan eski bo'lsa - qaytarmaslik
-    if pending and 'timestamp' in pending:
-        if (timezone.now() - pending['timestamp']).total_seconds() > _PENDING_PAYMENT_TIMEOUT:
-            del _pending_payments[user_id]
-            return None
-
-    return pending
+        # Yangi sessiya yaratish
+        expires_at = timezone.now() + timedelta(seconds=_PENDING_PAYMENT_TIMEOUT)
+        PendingPaymentSession.objects.create(
+            user=user,
+            tariff_id=tariff_id,
+            amount=amount,
+            is_discounted=with_discount,
+            message_id=0,  # Keyinchalik yangilanadi
+            expires_at=expires_at
+        )
+    except User.DoesNotExist:
+        pass
 
 
-async def delete_pending_payment(user_id: int):
-    """Pending to'lovni o'chirish"""
-    if user_id in _pending_payments:
-        del _pending_payments[user_id]
+@sync_to_async
+def get_pending_payment(user_id: int):
+    """Pending to'lovni database dan olish"""
+    # Eski sessiyalarni tozalash
+    PendingPaymentSession.cleanup_expired()
+
+    try:
+        user = User.objects.get(user_id=user_id)
+        session = PendingPaymentSession.objects.filter(user=user).first()
+
+        if session and not session.is_expired:
+            return {
+                'tariff_id': session.tariff_id,
+                'amount': session.amount,
+                'with_discount': session.is_discounted,
+                'timestamp': session.created_at
+            }
+        elif session:
+            # Muddati tugagan - o'chirish
+            session.delete()
+    except User.DoesNotExist:
+        pass
+
+    return None
 
 
+@sync_to_async
+def delete_pending_payment(user_id: int):
+    """Pending to'lovni database dan o'chirish"""
+    try:
+        user = User.objects.get(user_id=user_id)
+        PendingPaymentSession.objects.filter(user=user).delete()
+    except User.DoesNotExist:
+        pass
+
+
+@sync_to_async
 def get_pending_payments_count() -> int:
-    """Pending to'lovlar sonini olish (debug uchun)"""
-    _cleanup_old_pending_payments()
-    return len(_pending_payments)
+    """Pending to'lovlar sonini olish"""
+    PendingPaymentSession.cleanup_expired()
+    return PendingPaymentSession.objects.count()

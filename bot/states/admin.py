@@ -36,3 +36,16 @@ class EditSettingsState(StatesGroup):
     card_holder = State()
     trial_days = State()
     referral_bonus = State()
+    discount_percent = State()
+    discount_duration = State()
+
+
+class EditMessageState(StatesGroup):
+    """Xabar shablonini tahrirlash"""
+    message_type = State()
+    content = State()
+
+
+class UserSearchState(StatesGroup):
+    """User qidirish holatlari"""
+    query = State()

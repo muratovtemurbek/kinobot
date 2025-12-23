@@ -1,4 +1,5 @@
 from django.db import models
+from django.utils import timezone
 
 
 class Tariff(models.Model):
@@ -80,3 +81,44 @@ class Payment(models.Model):
 
     def __str__(self):
         return f"{self.user.full_name} - {self.amount} so'm - {self.get_status_display()}"
+
+
+class PendingPaymentSession(models.Model):
+    """To'lov sessiyasi - foydalanuvchi to'lov jarayonida"""
+
+    user = models.ForeignKey(
+        'users.User',
+        on_delete=models.CASCADE,
+        related_name='pending_sessions',
+        verbose_name='Foydalanuvchi'
+    )
+    tariff = models.ForeignKey(
+        Tariff,
+        on_delete=models.CASCADE,
+        related_name='pending_sessions',
+        verbose_name='Tarif'
+    )
+    amount = models.PositiveIntegerField(verbose_name="To'lov summasi")
+    is_discounted = models.BooleanField(default=False, verbose_name='Chegirma')
+    message_id = models.BigIntegerField(verbose_name='Xabar ID')
+
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Boshlangan vaqt')
+    expires_at = models.DateTimeField(verbose_name='Tugash vaqti')
+
+    class Meta:
+        verbose_name = "To'lov sessiyasi"
+        verbose_name_plural = "To'lov sessiyalari"
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.user.full_name} - {self.tariff.name}"
+
+    @property
+    def is_expired(self):
+        """Sessiya muddati tugaganmi"""
+        return timezone.now() > self.expires_at
+
+    @classmethod
+    def cleanup_expired(cls):
+        """Muddati tugagan sessiyalarni o'chirish"""
+        cls.objects.filter(expires_at__lt=timezone.now()).delete()

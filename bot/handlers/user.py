@@ -17,7 +17,7 @@ from bot.keyboards import (
     search_filter_kb, filter_country_kb, filter_language_kb, filter_year_kb,
     flash_sale_tariffs_kb
 )
-from bot.utils import get_or_create_user, format_number, format_date, update_user_joined_channel
+from bot.utils import get_or_create_user, format_number, format_date, update_user_joined_channel, record_channel_subscriptions
 
 
 async def is_user_admin(user_id: int) -> bool:
@@ -38,6 +38,10 @@ router = Router()
 # Cache
 _movies_cache = TTLCache(maxsize=100, ttl=120)
 _categories_cache = TTLCache(maxsize=1, ttl=300)
+
+# Obuna kutayotgan kanallar (user_id -> [channel_ids])
+# Bot orqali obuna bo'lganlarni aniq hisoblash uchun
+_pending_subscriptions = {}
 
 
 # ==================== START ====================
@@ -64,6 +68,9 @@ async def cmd_start(message: Message, bot: Bot):
     is_admin = await is_user_admin(user.id)
 
     if not_subscribed and not is_admin:
+        # Obuna bo'lmagan kanallarni eslab qolamiz (bot orqali obuna bo'lganlarni hisoblash uchun)
+        _pending_subscriptions[user.id] = [ch.id for ch in not_subscribed]
+
         await message.answer(
             f"👋 Salom, <b>{user.full_name}</b>!\n\n"
             "📢 Botdan foydalanish uchun kanallarga obuna bo'ling:\n\n"
@@ -101,6 +108,9 @@ async def check_sub_callback(callback: CallbackQuery, bot: Bot):
     not_subscribed = await check_subscription(bot, user.id)
 
     if not_subscribed:
+        # Obuna bo'lmagan kanallarni eslab qolamiz
+        _pending_subscriptions[user.id] = [ch.id for ch in not_subscribed]
+
         await callback.answer("❌ Barcha kanallarga obuna bo'ling!", show_alert=True)
         # Kanallar ro'yxatini yangilash
         try:
@@ -115,11 +125,15 @@ async def check_sub_callback(callback: CallbackQuery, bot: Bot):
 
     await callback.answer("✅ Tasdiqlandi!")
 
-    # Birinchi marta obuna bo'lgan kanal statistikasi uchun
-    all_channels = await get_active_channels()
-    if all_channels:
-        # Birinchi kanalni saqlaymiz
-        await update_user_joined_channel(user.id, all_channels[0].id)
+    # Faqat bot orqali obuna bo'lgan kanallarni yozamiz
+    if user.id in _pending_subscriptions:
+        pending_channel_ids = _pending_subscriptions.pop(user.id)
+        if pending_channel_ids:
+            # Faqat kutilgan kanallarni yozamiz
+            await record_channel_subscriptions(user.id, pending_channel_ids)
+
+            # Birinchi kanalni "kelgan kanal" sifatida saqlaymiz
+            await update_user_joined_channel(user.id, pending_channel_ids[0])
 
     is_admin = await is_user_admin(user.id)
 
@@ -732,16 +746,21 @@ async def premium_callback(callback: CallbackQuery, db_user: User = None):
         await callback.answer("📭 Tariflar mavjud emas.", show_alert=True)
         return
 
-    # Flash sale - 3 daqiqa ichida chegirma
-    is_flash_sale = True
-    seconds_left = 180
+    # Sozlamalardan chegirma muddatini olish
+    settings = await get_bot_settings()
+    discount_duration = settings.discount_duration  # sekundda
+    discount_percent = settings.discount_percent
 
-    if db_user:
+    # Flash sale - chegirma vaqti ichida
+    is_flash_sale = settings.discount_active
+    seconds_left = discount_duration
+
+    if db_user and settings.discount_active:
         # Birinchi ko'rishni qayd qilish
         if not db_user.premium_first_view:
             await set_premium_first_view(db_user.user_id)
             is_flash_sale = True
-            seconds_left = 180
+            seconds_left = discount_duration
         else:
             is_flash_sale = db_user.is_flash_sale_active
             seconds_left = db_user.flash_sale_seconds_left
@@ -749,6 +768,7 @@ async def premium_callback(callback: CallbackQuery, db_user: User = None):
     if is_flash_sale:
         minutes = seconds_left // 60
         secs = seconds_left % 60
+        duration_mins = discount_duration // 60
         timer_text = f"⏰ <b>CHEGIRMA!</b> Vaqt: {minutes}:{secs:02d}\n\n"
         text = (
             f"🔥 <b>FLASH SALE!</b> 🔥\n\n"
@@ -757,7 +777,7 @@ async def premium_callback(callback: CallbackQuery, db_user: User = None):
             "✅ Barcha kinolarga kirish\n"
             "✅ Reklamasiz foydalanish\n"
             "✅ Tezkor yuklash\n\n"
-            "⚡ <b>3 daqiqa ichida chegirmali narxda oling!</b>\n\n"
+            f"⚡ <b>{duration_mins} daqiqa ichida {discount_percent}% chegirmali narxda oling!</b>\n\n"
             "📦 Tarifni tanlang:"
         )
         await callback.message.edit_text(text, reply_markup=flash_sale_tariffs_kb(tariffs, is_discount=True))
@@ -792,13 +812,19 @@ async def premium_handler(message: Message, db_user: User = None):
         await message.answer("📭 Tariflar mavjud emas.")
         return
 
-    # Flash sale
-    is_flash_sale = True
-    seconds_left = 180
+    # Sozlamalardan chegirma muddatini olish
+    settings = await get_bot_settings()
+    discount_duration = settings.discount_duration
+    discount_percent = settings.discount_percent
 
-    if db_user:
+    # Flash sale
+    is_flash_sale = settings.discount_active
+    seconds_left = discount_duration
+
+    if db_user and settings.discount_active:
         if not db_user.premium_first_view:
             await set_premium_first_view(db_user.user_id)
+            seconds_left = discount_duration
         else:
             is_flash_sale = db_user.is_flash_sale_active
             seconds_left = db_user.flash_sale_seconds_left
@@ -806,6 +832,7 @@ async def premium_handler(message: Message, db_user: User = None):
     if is_flash_sale:
         minutes = seconds_left // 60
         secs = seconds_left % 60
+        duration_mins = discount_duration // 60
         await message.answer(
             f"🔥 <b>FLASH SALE!</b> 🔥\n\n"
             f"⏰ <b>CHEGIRMA!</b> Vaqt: {minutes}:{secs:02d}\n\n"
@@ -813,7 +840,7 @@ async def premium_handler(message: Message, db_user: User = None):
             "✅ Barcha kinolarga kirish\n"
             "✅ Reklamasiz foydalanish\n"
             "✅ Tezkor yuklash\n\n"
-            "⚡ <b>3 daqiqa ichida chegirmali narxda oling!</b>\n\n"
+            f"⚡ <b>{duration_mins} daqiqa ichida {discount_percent}% chegirmali narxda oling!</b>\n\n"
             "📦 Tarifni tanlang:",
             reply_markup=flash_sale_tariffs_kb(tariffs, is_discount=True)
         )

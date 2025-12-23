@@ -1,6 +1,6 @@
 from aiogram import Router, F, Bot
 from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from asgiref.sync import sync_to_async
 from django.utils import timezone
@@ -11,12 +11,12 @@ from apps.movies.models import Movie, Category
 from apps.payments.models import Payment
 from apps.core.models import Broadcast
 from bot.filters import IsAdmin, CanAddMovies, CanBroadcast, CanManageUsers, CanManagePayments, IsSuperAdmin
-from bot.states import AddMovieState, BroadcastState, AddChannelState, EditSettingsState
+from bot.states import AddMovieState, BroadcastState, AddChannelState, EditSettingsState, EditMessageState
 from bot.keyboards import (
     admin_categories_kb, movie_quality_kb, movie_language_kb, movie_country_kb,
     broadcast_target_kb, broadcast_ad_kb, confirm_broadcast_kb,
     cancel_inline_kb, admin_main_kb, skip_inline_kb,
-    main_menu_inline_kb, back_kb
+    main_menu_inline_kb, back_kb, admin_messages_kb
 )
 from apps.channels.models import Channel
 from bot.utils import format_number
@@ -91,8 +91,12 @@ async def stats_handler(callback: CallbackQuery):
         f"└ Tasdiqlangan: {format_number(stats['approved_payments'])}"
     )
 
-    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
     kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📈 Bugungi", callback_data="stats:today"),
+         InlineKeyboardButton(text="📊 Haftalik", callback_data="stats:week")],
+        [InlineKeyboardButton(text="📉 Oylik", callback_data="stats:month"),
+         InlineKeyboardButton(text="📅 Yillik", callback_data="stats:year")],
+        [InlineKeyboardButton(text="💎 Premium", callback_data="stats:premium")],
         [InlineKeyboardButton(text="⬅️ Orqaga", callback_data="admin:panel")]
     ])
 
@@ -1352,7 +1356,9 @@ async def view_channel(callback: CallbackQuery):
         await callback.answer("❌ Kanal topilmadi", show_alert=True)
         return
 
-    # Kanal orqali kelgan userlar sonini olish
+    # Kanal obunachilari sonini olish (yangi model)
+    subscribers_count = await get_channel_subscribers_count(channel_id)
+    # Eski usul - kanal orqali kelganlar
     joined_users_count = await get_channel_joined_users_count(channel_id)
 
     status = "✅ Aktiv" if channel.is_active else "❌ O'chirilgan"
@@ -1379,7 +1385,8 @@ async def view_channel(callback: CallbackQuery):
         f"📊 Holat: {status}\n"
         f"✅ Tekshirish: {checkable}\n\n"
         f"📈 <b>Statistika:</b>\n"
-        f"👥 Bu kanal orqali kelgan: <b>{joined_users_count}</b> ta user"
+        f"👥 Bot orqali obuna bo'lgan: <b>{subscribers_count}</b> ta\n"
+        f"📥 Birinchi kanal sifatida: <b>{joined_users_count}</b> ta"
     )
 
     from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -1450,19 +1457,25 @@ async def users_menu(callback: CallbackQuery):
     """Userlar"""
     stats = await get_user_stats()
 
-    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
     kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📋 Barcha userlar", callback_data="users:list:all:1")],
+        [InlineKeyboardButton(text="💎 Premium", callback_data="users:list:premium:1"),
+         InlineKeyboardButton(text="👤 Oddiy", callback_data="users:list:regular:1")],
+        [InlineKeyboardButton(text="🆕 Yangi (bugun)", callback_data="users:list:today:1"),
+         InlineKeyboardButton(text="⛔️ Banlangan", callback_data="users:list:banned:1")],
+        [InlineKeyboardButton(text="🔍 Qidirish", callback_data="users:search")],
         [InlineKeyboardButton(text="⬅️ Orqaga", callback_data="admin:panel")]
     ])
 
     text = (
-        "👥 <b>Userlar</b>\n\n"
+        "👥 <b>Userlar boshqaruvi</b>\n\n"
+        f"📊 <b>Statistika:</b>\n"
         f"├ Jami: {format_number(stats['total'])}\n"
-        f"├ Aktiv: {format_number(stats['active_24h'])}\n"
+        f"├ Aktiv (24s): {format_number(stats['active_24h'])}\n"
         f"├ Premium: {format_number(stats['premium'])}\n"
         f"├ Trial: {format_number(stats['trial'])}\n"
-        f"└ Ban: {format_number(stats['banned'])}\n\n"
-        "<b>Buyruqlar:</b>\n"
+        f"└ Banlangan: {format_number(stats['banned'])}\n\n"
+        "📝 <b>Buyruqlar:</b>\n"
         "<code>/user 123456</code> - Ma'lumot\n"
         "<code>/ban 123456</code> - Bloklash\n"
         "<code>/unban 123456</code> - Ochish"
@@ -1470,6 +1483,255 @@ async def users_menu(callback: CallbackQuery):
 
     await callback.message.edit_text(text, reply_markup=kb)
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("users:list:"), CanManageUsers())
+async def users_list(callback: CallbackQuery):
+    """Userlar ro'yxati"""
+    parts = callback.data.split(":")
+    filter_type = parts[2]  # all, premium, regular, today, banned
+    page = int(parts[3])
+
+    users, total_pages, total_count = await get_users_list(filter_type, page)
+
+    if not users:
+        await callback.answer("📭 Userlar topilmadi", show_alert=True)
+        return
+
+    filter_names = {
+        'all': '📋 Barcha userlar',
+        'premium': '💎 Premium userlar',
+        'regular': '👤 Oddiy userlar',
+        'today': '🆕 Bugungi userlar',
+        'banned': '⛔️ Banlangan userlar'
+    }
+
+    text = f"{filter_names.get(filter_type, 'Userlar')}\n"
+    text += f"📊 Jami: {format_number(total_count)} ta | Sahifa: {page}/{total_pages}\n\n"
+
+    for user in users:
+        status = "💎" if user.is_premium_active else ("🎁" if user.is_trial_active else "👤")
+        banned = " ⛔️" if user.is_banned else ""
+        text += f"{status} <code>{user.user_id}</code> - {user.full_name[:20]}{banned}\n"
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    builder = InlineKeyboardBuilder()
+
+    # User tugmalari
+    for user in users[:5]:  # Faqat birinchi 5 ta uchun tugma
+        builder.row(InlineKeyboardButton(
+            text=f"👤 {user.full_name[:15]} ({user.user_id})",
+            callback_data=f"user:view:{user.user_id}"
+        ))
+
+    # Pagination
+    nav_buttons = []
+    if page > 1:
+        nav_buttons.append(InlineKeyboardButton(text="◀️", callback_data=f"users:list:{filter_type}:{page - 1}"))
+    nav_buttons.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data="noop"))
+    if page < total_pages:
+        nav_buttons.append(InlineKeyboardButton(text="▶️", callback_data=f"users:list:{filter_type}:{page + 1}"))
+
+    if nav_buttons:
+        builder.row(*nav_buttons)
+
+    builder.row(InlineKeyboardButton(text="⬅️ Orqaga", callback_data="admin:users"))
+
+    await callback.message.edit_text(text, reply_markup=builder.as_markup())
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("user:view:"), CanManageUsers())
+async def user_view(callback: CallbackQuery):
+    """User ma'lumotlari"""
+    user_id = int(callback.data.split(":")[2])
+
+    user_data = await get_user_full_info(user_id)
+    if not user_data:
+        await callback.answer("❌ User topilmadi", show_alert=True)
+        return
+
+    user = user_data['user']
+    referrals_count = user_data['referrals_count']
+
+    status = "💎 Premium" if user.is_premium_active else ("🎁 Trial" if user.is_trial_active else "👤 Oddiy")
+
+    text = (
+        f"👤 <b>Foydalanuvchi ma'lumotlari</b>\n\n"
+        f"🆔 ID: <code>{user.user_id}</code>\n"
+        f"👤 Ism: {user.full_name}\n"
+        f"📛 Username: @{user.username or 'yo`q'}\n"
+        f"📊 Status: {status}\n"
+    )
+
+    if user.is_premium_active:
+        text += f"⏰ Premium tugaydi: {user.premium_expires.strftime('%d.%m.%Y')}\n"
+        text += f"📅 Qolgan kun: {user.days_left}\n"
+
+    text += (
+        f"\n⛔️ Bloklangan: {'Ha' if user.is_banned else 'Yo`q'}\n"
+    )
+
+    if user.is_banned and user.ban_reason:
+        text += f"📝 Sabab: {user.ban_reason}\n"
+
+    text += (
+        f"\n🎬 Ko'rilgan kinolar: {user.movies_watched}\n"
+        f"👥 Referal kod: <code>{user.referral_code}</code>\n"
+        f"👥 Taklif qilganlar: {referrals_count} ta\n"
+        f"\n📅 Ro'yxatdan o'tgan: {user.created_at.strftime('%d.%m.%Y %H:%M')}\n"
+        f"🕐 Oxirgi faollik: {user.last_active.strftime('%d.%m.%Y %H:%M')}"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="⛔️ Bloklash" if not user.is_banned else "✅ Blokdan chiqarish",
+            callback_data=f"user:{'unban' if user.is_banned else 'ban'}:{user.user_id}"
+        )],
+        [InlineKeyboardButton(text="💎 Premium berish", callback_data=f"user:give_premium:{user.user_id}")],
+        [InlineKeyboardButton(text="⬅️ Orqaga", callback_data="admin:users")]
+    ])
+
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("user:ban:"), CanManageUsers())
+async def user_ban_callback(callback: CallbackQuery):
+    """Userni bloklash"""
+    user_id = int(callback.data.split(":")[2])
+    result = await ban_user(user_id, "Admin tomonidan bloklangan")
+
+    if result:
+        await callback.answer("✅ User bloklandi!", show_alert=True)
+    else:
+        await callback.answer("❌ Xatolik yuz berdi", show_alert=True)
+
+    await user_view(callback)
+
+
+@router.callback_query(F.data.startswith("user:unban:"), CanManageUsers())
+async def user_unban_callback(callback: CallbackQuery):
+    """Userni blokdan chiqarish"""
+    user_id = int(callback.data.split(":")[2])
+    result = await unban_user(user_id)
+
+    if result:
+        await callback.answer("✅ User blokdan chiqarildi!", show_alert=True)
+    else:
+        await callback.answer("❌ Xatolik yuz berdi", show_alert=True)
+
+    await user_view(callback)
+
+
+@router.callback_query(F.data.startswith("user:give_premium:"), CanManageUsers())
+async def user_give_premium_menu(callback: CallbackQuery):
+    """Premium berish menyusi"""
+    user_id = int(callback.data.split(":")[2])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="7 kun", callback_data=f"user:add_premium:{user_id}:7"),
+         InlineKeyboardButton(text="30 kun", callback_data=f"user:add_premium:{user_id}:30")],
+        [InlineKeyboardButton(text="90 kun", callback_data=f"user:add_premium:{user_id}:90"),
+         InlineKeyboardButton(text="365 kun", callback_data=f"user:add_premium:{user_id}:365")],
+        [InlineKeyboardButton(text="⬅️ Orqaga", callback_data=f"user:view:{user_id}")]
+    ])
+
+    await callback.message.edit_text(
+        f"💎 <b>Premium berish</b>\n\nUser ID: <code>{user_id}</code>\n\nNecha kun premium berasiz?",
+        reply_markup=kb
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("user:add_premium:"), CanManageUsers())
+async def user_add_premium(callback: CallbackQuery):
+    """Userga premium berish"""
+    parts = callback.data.split(":")
+    user_id = int(parts[2])
+    days = int(parts[3])
+
+    result = await give_user_premium(user_id, days)
+
+    if result:
+        await callback.answer(f"✅ {days} kun premium berildi!", show_alert=True)
+    else:
+        await callback.answer("❌ Xatolik yuz berdi", show_alert=True)
+
+    # User view ga qaytish
+    callback.data = f"user:view:{user_id}"
+    await user_view(callback)
+
+
+@router.callback_query(F.data == "users:search", CanManageUsers())
+async def users_search_prompt(callback: CallbackQuery, state: FSMContext):
+    """User qidirish"""
+    from bot.states import UserSearchState
+
+    await state.set_state(UserSearchState.query)
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Bekor qilish", callback_data="admin:users")]
+    ])
+
+    await callback.message.edit_text(
+        "🔍 <b>User qidirish</b>\n\n"
+        "User ID yoki username kiriting:\n"
+        "<i>Masalan: 123456789 yoki @username</i>",
+        reply_markup=kb
+    )
+    await callback.answer()
+
+
+@router.message(F.text, CanManageUsers())
+async def users_search_handler(message: Message, state: FSMContext):
+    """User qidirish natijasi"""
+    from bot.states import UserSearchState
+
+    current_state = await state.get_state()
+    if current_state != UserSearchState.query:
+        return
+
+    await state.clear()
+
+    query = message.text.strip()
+
+    # ID bo'yicha qidirish
+    if query.isdigit():
+        user = await get_user_by_telegram_id(int(query))
+    # Username bo'yicha qidirish
+    elif query.startswith("@"):
+        user = await search_user_by_username(query[1:])
+    else:
+        user = await search_user_by_username(query)
+
+    if not user:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔍 Qayta qidirish", callback_data="users:search")],
+            [InlineKeyboardButton(text="⬅️ Orqaga", callback_data="admin:users")]
+        ])
+        await message.answer("❌ Foydalanuvchi topilmadi.", reply_markup=kb)
+        return
+
+    # User ma'lumotlarini ko'rsatish
+    status = "💎 Premium" if user.is_premium_active else ("🎁 Trial" if user.is_trial_active else "👤 Oddiy")
+
+    text = (
+        f"👤 <b>Foydalanuvchi topildi!</b>\n\n"
+        f"🆔 ID: <code>{user.user_id}</code>\n"
+        f"👤 Ism: {user.full_name}\n"
+        f"📛 Username: @{user.username or 'yo`q'}\n"
+        f"📊 Status: {status}\n"
+        f"⛔️ Bloklangan: {'Ha' if user.is_banned else 'Yo`q'}\n"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👁 Batafsil", callback_data=f"user:view:{user.user_id}")],
+        [InlineKeyboardButton(text="🔍 Qayta qidirish", callback_data="users:search")],
+        [InlineKeyboardButton(text="⬅️ Orqaga", callback_data="admin:users")]
+    ])
+
+    await message.answer(text, reply_markup=kb)
 
 
 @router.message(Command("user"), CanManageUsers())
@@ -1562,15 +1824,26 @@ async def settings_menu_callback(callback: CallbackQuery):
     settings = await get_bot_settings()
 
     status = "✅ Aktiv" if settings.is_active else "❌ O'chirilgan"
-    discount = f"✅ {settings.discount_percent}%" if settings.discount_active else "❌ O'chirilgan"
+    discount_status = "✅ Aktiv" if settings.discount_active else "❌ O'chirilgan"
     referral = f"✅ +{settings.referral_bonus} kun" if settings.referral_active else "❌ O'chirilgan"
+
+    # Chegirma vaqtini formatlash
+    discount_mins = settings.discount_duration // 60
+    discount_secs = settings.discount_duration % 60
+    if discount_secs > 0:
+        discount_time = f"{discount_mins} daqiqa {discount_secs} sekund"
+    else:
+        discount_time = f"{discount_mins} daqiqa"
 
     text = (
         "⚙️ <b>Bot sozlamalari</b>\n\n"
         f"🤖 Bot holati: {status}\n"
         f"🎁 Bepul muddat: {settings.free_trial_days} kun\n"
-        f"💰 Chegirma: {discount}\n"
         f"🔗 Referal bonus: {referral}\n\n"
+        f"💰 <b>Chegirma sozlamalari:</b>\n"
+        f"├ Holati: {discount_status}\n"
+        f"├ Foiz: {settings.discount_percent}%\n"
+        f"└ Muddat: {discount_time}\n\n"
         f"💳 <b>To'lov ma'lumotlari:</b>\n"
         f"Karta: <code>{settings.card_number}</code>\n"
         f"Egasi: {settings.card_holder}"
@@ -1584,6 +1857,8 @@ async def settings_menu_callback(callback: CallbackQuery):
          InlineKeyboardButton(text="🔗 Referal bonus", callback_data="settings:referral_bonus")],
         [InlineKeyboardButton(text="🤖 Bot on/off", callback_data="settings:toggle_bot"),
          InlineKeyboardButton(text="💰 Chegirma on/off", callback_data="settings:toggle_discount")],
+        [InlineKeyboardButton(text="📊 Chegirma foizi", callback_data="settings:discount_percent"),
+         InlineKeyboardButton(text="⏱ Chegirma muddati", callback_data="settings:discount_duration")],
         [InlineKeyboardButton(text="⬅️ Orqaga", callback_data="admin:panel")]
     ])
 
@@ -1790,6 +2065,99 @@ async def toggle_discount_status(callback: CallbackQuery):
     await settings_menu_callback(callback)
 
 
+@router.callback_query(F.data == "settings:discount_percent", IsSuperAdmin())
+async def edit_discount_percent_start(callback: CallbackQuery, state: FSMContext):
+    """Chegirma foizini o'zgartirish"""
+    settings = await get_bot_settings()
+    await state.set_state(EditSettingsState.discount_percent)
+    await callback.message.edit_text(
+        f"📊 <b>Chegirma foizini kiriting:</b>\n\n"
+        f"Hozirgi: <code>{settings.discount_percent}%</code>\n\n"
+        f"1 dan 99 gacha son kiriting:",
+        reply_markup=cancel_inline_kb()
+    )
+    await callback.answer()
+
+
+@router.message(EditSettingsState.discount_percent, F.text, IsSuperAdmin())
+async def edit_discount_percent_save(message: Message, state: FSMContext):
+    """Chegirma foizini saqlash"""
+    try:
+        percent = int(message.text.strip())
+        if percent < 1 or percent > 99:
+            raise ValueError()
+    except ValueError:
+        await message.answer(
+            "❌ Noto'g'ri format!\n\n"
+            "1 dan 99 gacha son kiriting.\n"
+            "Masalan: <code>50</code>",
+            reply_markup=cancel_inline_kb()
+        )
+        return
+
+    await update_bot_setting('discount_percent', percent)
+    await state.clear()
+
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⚙️ Sozlamalar", callback_data="admin:settings")]
+    ])
+
+    await message.answer(
+        f"✅ <b>Chegirma foizi yangilandi!</b>\n\n"
+        f"Yangi foiz: <code>{percent}%</code>",
+        reply_markup=kb
+    )
+
+
+@router.callback_query(F.data == "settings:discount_duration", IsSuperAdmin())
+async def edit_discount_duration_start(callback: CallbackQuery, state: FSMContext):
+    """Chegirma muddatini o'zgartirish"""
+    settings = await get_bot_settings()
+    current_mins = settings.discount_duration // 60
+    await state.set_state(EditSettingsState.discount_duration)
+    await callback.message.edit_text(
+        f"⏱ <b>Chegirma muddatini kiriting (daqiqada):</b>\n\n"
+        f"Hozirgi: <code>{current_mins}</code> daqiqa\n\n"
+        f"1 dan 60 gacha son kiriting:",
+        reply_markup=cancel_inline_kb()
+    )
+    await callback.answer()
+
+
+@router.message(EditSettingsState.discount_duration, F.text, IsSuperAdmin())
+async def edit_discount_duration_save(message: Message, state: FSMContext):
+    """Chegirma muddatini saqlash"""
+    try:
+        minutes = int(message.text.strip())
+        if minutes < 1 or minutes > 60:
+            raise ValueError()
+    except ValueError:
+        await message.answer(
+            "❌ Noto'g'ri format!\n\n"
+            "1 dan 60 gacha son kiriting.\n"
+            "Masalan: <code>3</code> (3 daqiqa)",
+            reply_markup=cancel_inline_kb()
+        )
+        return
+
+    # Daqiqani sekundga aylantirish
+    duration_seconds = minutes * 60
+    await update_bot_setting('discount_duration', duration_seconds)
+    await state.clear()
+
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⚙️ Sozlamalar", callback_data="admin:settings")]
+    ])
+
+    await message.answer(
+        f"✅ <b>Chegirma muddati yangilandi!</b>\n\n"
+        f"Yangi muddat: <code>{minutes}</code> daqiqa",
+        reply_markup=kb
+    )
+
+
 # ==================== CHIQISH ====================
 
 @router.message(F.text.in_({"🔙 Chiqish", "🏠 Asosiy menyu"}), IsAdmin())
@@ -1981,6 +2349,15 @@ def get_user_by_telegram_id(user_id: int):
 
 
 @sync_to_async
+def search_user_by_username(username: str):
+    """Username bo'yicha user qidirish"""
+    try:
+        return User.objects.filter(username__iexact=username).first()
+    except Exception:
+        return None
+
+
+@sync_to_async
 def ban_user(user_id: int, reason: str = None) -> bool:
     try:
         user = User.objects.get(user_id=user_id)
@@ -2075,6 +2452,13 @@ def get_channel_by_id(pk: int):
 def get_channel_joined_users_count(channel_pk: int) -> int:
     """Kanal orqali kelgan userlar sonini olish"""
     return User.objects.filter(joined_from_channel_id=channel_pk).count()
+
+
+@sync_to_async
+def get_channel_subscribers_count(channel_pk: int) -> int:
+    """Kanal obunachilari soni (ChannelSubscription modelidan)"""
+    from apps.channels.models import ChannelSubscription
+    return ChannelSubscription.objects.filter(channel_id=channel_pk).count()
 
 
 @sync_to_async
@@ -2188,3 +2572,591 @@ def delete_channel(pk: int) -> bool:
         return True
     except Channel.DoesNotExist:
         return False
+
+
+# ==================== XABAR SHABLONLARI ====================
+
+@router.callback_query(F.data == "admin:messages", IsAdmin())
+async def messages_menu(callback: CallbackQuery):
+    """Xabar shablonlari menyusi"""
+    from apps.core.models import MessageTemplate
+
+    messages = await sync_to_async(list)(MessageTemplate.objects.all())
+
+    # Agar xabarlar yo'q bo'lsa, default xabarlarni yaratamiz
+    if not messages:
+        await sync_to_async(MessageTemplate.init_defaults)()
+        messages = await sync_to_async(list)(MessageTemplate.objects.all())
+
+    text = (
+        "✏️ <b>Xabar shablonlari</b>\n\n"
+        "Bu yerda botdagi barcha xabarlarni o'zgartirishingiz mumkin.\n"
+        "Har bir xabarni bosing va yangi matn kiriting."
+    )
+
+    await callback.message.edit_text(text, reply_markup=admin_messages_kb(messages))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("edit_msg:"), IsAdmin())
+async def edit_message_start(callback: CallbackQuery, state: FSMContext):
+    """Xabarni tahrirlash"""
+    from apps.core.models import MessageTemplate
+
+    msg_type = callback.data.split(":")[1]
+
+    try:
+        template = await sync_to_async(MessageTemplate.objects.get)(message_type=msg_type)
+    except MessageTemplate.DoesNotExist:
+        await callback.answer("Xabar topilmadi", show_alert=True)
+        return
+
+    await state.set_state(EditMessageState.content)
+    await state.update_data(message_type=msg_type)
+
+    text = (
+        f"✏️ <b>{template.title}</b>\n\n"
+        f"📝 <b>Hozirgi xabar:</b>\n"
+        f"<code>{template.content}</code>\n\n"
+    )
+
+    if template.placeholders_help:
+        text += f"💡 <b>Placeholders:</b>\n{template.placeholders_help}\n\n"
+
+    text += "📨 Yangi xabarni yuboring:"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Bekor qilish", callback_data="admin:messages")]
+    ])
+
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
+
+@router.message(EditMessageState.content, IsAdmin())
+async def edit_message_content(message: Message, state: FSMContext):
+    """Yangi xabar matnini saqlash"""
+    from apps.core.models import MessageTemplate
+
+    data = await state.get_data()
+    msg_type = data.get('message_type')
+
+    if not msg_type:
+        await state.clear()
+        return
+
+    new_content = message.text
+
+    @sync_to_async
+    def update_message():
+        template = MessageTemplate.objects.get(message_type=msg_type)
+        template.content = new_content
+        template.save()
+        return template.title
+
+    title = await update_message()
+    await state.clear()
+
+    text = f"✅ <b>{title}</b> xabari yangilandi!"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Xabarlarga qaytish", callback_data="admin:messages")],
+        [InlineKeyboardButton(text="🏠 Admin panel", callback_data="admin:panel")]
+    ])
+
+    await message.answer(text, reply_markup=kb)
+
+
+@router.callback_query(F.data == "reset_messages", IsAdmin())
+async def reset_messages(callback: CallbackQuery):
+    """Barcha xabarlarni default holatga qaytarish"""
+    from apps.core.models import MessageTemplate
+
+    @sync_to_async
+    def reset_all():
+        MessageTemplate.objects.all().delete()
+        MessageTemplate.init_defaults()
+
+    await reset_all()
+
+    await callback.answer("✅ Barcha xabarlar tiklandi!", show_alert=True)
+    await messages_menu(callback)
+
+
+# ==================== BATAFSIL STATISTIKA ====================
+
+@router.callback_query(F.data == "stats:today", IsAdmin())
+async def stats_today(callback: CallbackQuery):
+    """Bugungi statistika"""
+    stats = await get_today_stats()
+
+    text = (
+        "📈 <b>Bugungi statistika</b>\n\n"
+        f"👥 <b>Yangi obunchilar:</b> +{format_number(stats['new_users'])}\n"
+        f"💎 <b>Yangi premium:</b> +{format_number(stats['new_premium'])}\n"
+        f"💰 <b>Tushumlar:</b> {format_number(stats['total_income'])} so'm\n"
+        f"🎬 <b>Ko'rishlar:</b> {format_number(stats['total_views'])}\n\n"
+        f"⏰ <b>Eng faol soat:</b> {stats['peak_hour']}:00\n"
+        f"📊 <b>O'rtacha aktivlik:</b> {format_number(stats['avg_activity'])}"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Orqaga", callback_data="admin:stats")]
+    ])
+
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "stats:week", IsAdmin())
+async def stats_week(callback: CallbackQuery):
+    """Haftalik statistika"""
+    stats = await get_period_stats(days=7)
+
+    text = (
+        f"📊 <b>Haftalik statistika</b>\n"
+        f"📅 {stats['start_date']} - {stats['end_date']}\n\n"
+        f"👥 <b>Yangi obunchilar:</b> +{format_number(stats['new_users'])}\n"
+        f"💎 <b>Yangi premium:</b> +{format_number(stats['new_premium'])}\n"
+        f"💰 <b>Tushumlar:</b> {format_number(stats['total_income'])} so'm\n\n"
+        f"📈 <b>Kunlik o'rtacha:</b>\n"
+        f"├ Obunchilar: +{format_number(stats['avg_users_per_day'])}\n"
+        f"└ Premium: +{format_number(stats['avg_premium_per_day'])}\n\n"
+        f"📅 <b>Kunlik statistika:</b>\n"
+    )
+
+    for day in stats['daily_stats']:
+        text += f"├ {day['date']} ({day['weekday']}): +{format_number(day['users'])} user, +{format_number(day['premium'])} premium\n"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Orqaga", callback_data="admin:stats")]
+    ])
+
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "stats:month", IsAdmin())
+async def stats_month(callback: CallbackQuery):
+    """Oylik statistika"""
+    stats = await get_period_stats(days=30)
+
+    text = (
+        f"📉 <b>Oylik statistika</b>\n"
+        f"📅 {stats['start_date']} - {stats['end_date']}\n\n"
+        f"👥 <b>Yangi obunchilar:</b> +{format_number(stats['new_users'])}\n"
+        f"💎 <b>Yangi premium:</b> +{format_number(stats['new_premium'])}\n"
+        f"💰 <b>Tushumlar:</b> {format_number(stats['total_income'])} so'm\n\n"
+        f"📈 <b>Kunlik o'rtacha:</b>\n"
+        f"├ Obunchilar: +{format_number(stats['avg_users_per_day'])}\n"
+        f"└ Premium: +{format_number(stats['avg_premium_per_day'])}\n\n"
+        f"📊 <b>Haftalik ko'rsatkichlar:</b>\n"
+    )
+
+    for week in stats['weekly_stats']:
+        text += f"├ {week['week']}-hafta ({week['start']} - {week['end']}): +{format_number(week['users'])} user, +{format_number(week['premium'])} premium\n"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Orqaga", callback_data="admin:stats")]
+    ])
+
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "stats:premium", IsAdmin())
+async def stats_premium(callback: CallbackQuery):
+    """Premium statistika"""
+    stats = await get_premium_stats()
+
+    text = (
+        "💎 <b>Premium statistika</b>\n\n"
+        f"👥 <b>Jami premium:</b> {format_number(stats['total_premium'])}\n"
+        f"✅ <b>Aktiv:</b> {format_number(stats['active_premium'])}\n"
+        f"⏰ <b>Tugagan:</b> {format_number(stats['expired_premium'])}\n\n"
+        f"📈 <b>So'nggi 30 kun:</b>\n"
+        f"├ Yangi premium: +{format_number(stats['new_premium_30d'])}\n"
+        f"├ Tushumlar: {format_number(stats['income_30d'])} so'm\n"
+        f"└ O'rtacha kun: {format_number(stats['avg_premium_days'])}\n\n"
+        f"🏆 <b>Top tariflar:</b>\n"
+    )
+
+    for i, tariff in enumerate(stats['top_tariffs'], 1):
+        text += f"{i}. {tariff['name']}: {format_number(tariff['count'])} ta\n"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Orqaga", callback_data="admin:stats")]
+    ])
+
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "stats:year", IsAdmin())
+async def stats_year(callback: CallbackQuery):
+    """Yillik statistika - oyma-oy"""
+    stats = await get_yearly_stats()
+
+    text = (
+        f"📅 <b>Yillik statistika - {stats['year']}</b>\n\n"
+        f"👥 <b>Jami yangi obunchilar:</b> +{format_number(stats['total_users'])}\n"
+        f"💎 <b>Jami yangi premium:</b> +{format_number(stats['total_premium'])}\n"
+        f"💰 <b>Jami tushumlar:</b> {format_number(stats['total_income'])} so'm\n\n"
+        f"📊 <b>Oylik o'rtacha:</b>\n"
+        f"├ Obunchilar: +{format_number(stats['avg_users_per_month'])}\n"
+        f"└ Premium: +{format_number(stats['avg_premium_per_month'])}\n\n"
+        f"📈 <b>Oyma-oy statistika:</b>\n"
+    )
+
+    for month in stats['monthly_stats']:
+        if month['users'] > 0 or month['premium'] > 0:
+            text += f"├ {month['month_name']}: +{format_number(month['users'])} user, +{format_number(month['premium'])} premium, {format_number(month['income'])} so'm\n"
+
+    if not any(m['users'] > 0 or m['premium'] > 0 for m in stats['monthly_stats']):
+        text += "├ Ma'lumot yo'q\n"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Orqaga", callback_data="admin:stats")]
+    ])
+
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
+
+# ==================== STATISTIKA HELPER FUNCTIONS ====================
+
+@sync_to_async
+def get_today_stats():
+    """Bugungi statistika"""
+    from django.db.models import Count, Sum
+    from django.db.models.functions import ExtractHour
+    from datetime import datetime, timedelta
+
+    today = timezone.now().date()
+    today_start = timezone.make_aware(datetime.combine(today, datetime.min.time()))
+
+    new_users = User.objects.filter(created_at__gte=today_start).count()
+    new_premium = Payment.objects.filter(
+        status='approved',
+        created_at__gte=today_start
+    ).count()
+
+    total_income = Payment.objects.filter(
+        status='approved',
+        created_at__gte=today_start
+    ).aggregate(total=Sum('tariff__price'))['total'] or 0
+
+    # Jami ko'rishlar (bugungi ko'rishlarni alohida track qilish imkoni yo'q)
+    total_views = Movie.objects.aggregate(total=Sum('views'))['total'] or 0
+
+    # Eng faol soat
+    hourly = User.objects.filter(
+        created_at__gte=today_start
+    ).annotate(
+        hour=ExtractHour('created_at')
+    ).values('hour').annotate(count=Count('id')).order_by('-count')
+
+    peak_hour = hourly[0]['hour'] if hourly else 12
+    avg_activity = new_users // max(1, (timezone.now().hour or 1))
+
+    return {
+        'new_users': new_users,
+        'new_premium': new_premium,
+        'total_income': total_income,
+        'total_views': total_views,
+        'peak_hour': peak_hour,
+        'avg_activity': avg_activity
+    }
+
+
+@sync_to_async
+def get_period_stats(days: int):
+    """Davr statistikasi"""
+    from django.db.models import Count, Sum
+    from datetime import datetime, timedelta
+
+    # Hafta kunlari nomlari
+    weekdays = ['Du', 'Se', 'Chor', 'Pay', 'Ju', 'Sha', 'Yak']
+
+    end_date = timezone.now()
+    start_date = end_date - timedelta(days=days)
+
+    new_users = User.objects.filter(created_at__gte=start_date).count()
+    new_premium = Payment.objects.filter(
+        status='approved',
+        created_at__gte=start_date
+    ).count()
+
+    total_income = Payment.objects.filter(
+        status='approved',
+        created_at__gte=start_date
+    ).aggregate(total=Sum('tariff__price'))['total'] or 0
+
+    avg_users_per_day = new_users // max(1, days)
+    avg_premium_per_day = new_premium // max(1, days)
+
+    # Kunlik statistika
+    daily_stats = []
+    for i in range(min(7, days)):
+        day_start = (end_date - timedelta(days=i)).replace(hour=0, minute=0, second=0, microsecond=0)
+        day_end = day_start + timedelta(days=1)
+
+        day_users = User.objects.filter(created_at__gte=day_start, created_at__lt=day_end).count()
+        day_premium = Payment.objects.filter(
+            status='approved',
+            created_at__gte=day_start,
+            created_at__lt=day_end
+        ).count()
+
+        daily_stats.append({
+            'date': day_start.strftime('%d.%m'),
+            'weekday': weekdays[day_start.weekday()],
+            'users': day_users,
+            'premium': day_premium
+        })
+
+    # Haftalik statistika (faqat 30 kun uchun)
+    weekly_stats = []
+    if days >= 7:
+        for week in range(min(4, days // 7)):
+            week_end = end_date - timedelta(days=week * 7)
+            week_start = end_date - timedelta(days=(week + 1) * 7)
+
+            week_users = User.objects.filter(created_at__gte=week_start, created_at__lt=week_end).count()
+            week_premium = Payment.objects.filter(
+                status='approved',
+                created_at__gte=week_start,
+                created_at__lt=week_end
+            ).count()
+
+            weekly_stats.append({
+                'week': week + 1,
+                'start': week_start.strftime('%d.%m'),
+                'end': week_end.strftime('%d.%m'),
+                'users': week_users,
+                'premium': week_premium
+            })
+
+    return {
+        'new_users': new_users,
+        'new_premium': new_premium,
+        'total_income': total_income,
+        'avg_users_per_day': avg_users_per_day,
+        'avg_premium_per_day': avg_premium_per_day,
+        'daily_stats': daily_stats,
+        'weekly_stats': weekly_stats,
+        'start_date': start_date.strftime('%d.%m.%Y'),
+        'end_date': end_date.strftime('%d.%m.%Y')
+    }
+
+
+@sync_to_async
+def get_premium_stats():
+    """Premium statistikasi"""
+    from django.db.models import Count, Sum, Avg
+    from datetime import timedelta
+    from apps.payments.models import Tariff
+
+    now = timezone.now()
+    month_ago = now - timedelta(days=30)
+
+    total_premium = User.objects.filter(is_premium=True).count()
+    active_premium = User.objects.filter(is_premium=True, premium_expires__gt=now).count()
+    expired_premium = total_premium - active_premium
+
+    new_premium_30d = Payment.objects.filter(
+        status='approved',
+        created_at__gte=month_ago
+    ).count()
+
+    income_30d = Payment.objects.filter(
+        status='approved',
+        created_at__gte=month_ago
+    ).aggregate(total=Sum('tariff__price'))['total'] or 0
+
+    # O'rtacha premium kunlari
+    avg_days = Payment.objects.filter(
+        status='approved'
+    ).aggregate(avg=Avg('tariff__days'))['avg'] or 0
+
+    # Top tariflar
+    top_tariffs = list(
+        Payment.objects.filter(status='approved')
+        .values('tariff__name')
+        .annotate(count=Count('id'))
+        .order_by('-count')[:5]
+    )
+
+    return {
+        'total_premium': total_premium,
+        'active_premium': active_premium,
+        'expired_premium': expired_premium,
+        'new_premium_30d': new_premium_30d,
+        'income_30d': income_30d,
+        'avg_premium_days': int(avg_days),
+        'top_tariffs': [{'name': t['tariff__name'], 'count': t['count']} for t in top_tariffs]
+    }
+
+
+@sync_to_async
+def get_yearly_stats():
+    """Yillik statistika - oyma-oy"""
+    from django.db.models import Count, Sum
+    from datetime import datetime
+
+    # Oy nomlari
+    month_names = [
+        'Yanvar', 'Fevral', 'Mart', 'Aprel', 'May', 'Iyun',
+        'Iyul', 'Avgust', 'Sentyabr', 'Oktyabr', 'Noyabr', 'Dekabr'
+    ]
+
+    now = timezone.now()
+    current_year = now.year
+
+    # Yil boshidan hozirgi kungacha
+    year_start = timezone.make_aware(datetime(current_year, 1, 1, 0, 0, 0))
+
+    total_users = User.objects.filter(created_at__gte=year_start).count()
+    total_premium = Payment.objects.filter(
+        status='approved',
+        created_at__gte=year_start
+    ).count()
+
+    total_income = Payment.objects.filter(
+        status='approved',
+        created_at__gte=year_start
+    ).aggregate(total=Sum('tariff__price'))['total'] or 0
+
+    # Oyma-oy statistika
+    monthly_stats = []
+    months_passed = now.month
+
+    for month in range(1, 13):
+        month_start = timezone.make_aware(datetime(current_year, month, 1, 0, 0, 0))
+
+        # Keyingi oy boshi
+        if month == 12:
+            month_end = timezone.make_aware(datetime(current_year + 1, 1, 1, 0, 0, 0))
+        else:
+            month_end = timezone.make_aware(datetime(current_year, month + 1, 1, 0, 0, 0))
+
+        # Faqat o'tgan oylar uchun statistika
+        if month <= now.month:
+            month_users = User.objects.filter(
+                created_at__gte=month_start,
+                created_at__lt=month_end
+            ).count()
+
+            month_premium = Payment.objects.filter(
+                status='approved',
+                created_at__gte=month_start,
+                created_at__lt=month_end
+            ).count()
+
+            month_income = Payment.objects.filter(
+                status='approved',
+                created_at__gte=month_start,
+                created_at__lt=month_end
+            ).aggregate(total=Sum('tariff__price'))['total'] or 0
+        else:
+            month_users = 0
+            month_premium = 0
+            month_income = 0
+
+        monthly_stats.append({
+            'month': month,
+            'month_name': month_names[month - 1],
+            'users': month_users,
+            'premium': month_premium,
+            'income': month_income
+        })
+
+    avg_users_per_month = total_users // max(1, months_passed)
+    avg_premium_per_month = total_premium // max(1, months_passed)
+
+    return {
+        'year': current_year,
+        'total_users': total_users,
+        'total_premium': total_premium,
+        'total_income': total_income,
+        'avg_users_per_month': avg_users_per_month,
+        'avg_premium_per_month': avg_premium_per_month,
+        'monthly_stats': monthly_stats
+    }
+
+
+# ==================== USER HELPER FUNCTIONS ====================
+
+@sync_to_async
+def get_users_list(filter_type: str, page: int = 1, per_page: int = 10):
+    """Userlar ro'yxatini olish"""
+    from datetime import timedelta
+
+    queryset = User.objects.all()
+
+    if filter_type == 'premium':
+        queryset = queryset.filter(is_premium=True, premium_expires__gt=timezone.now())
+    elif filter_type == 'regular':
+        queryset = queryset.filter(is_premium=False)
+    elif filter_type == 'today':
+        today_start = timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        queryset = queryset.filter(created_at__gte=today_start)
+    elif filter_type == 'banned':
+        queryset = queryset.filter(is_banned=True)
+
+    total_count = queryset.count()
+    total_pages = max(1, (total_count + per_page - 1) // per_page)
+
+    offset = (page - 1) * per_page
+    users = list(queryset.order_by('-created_at')[offset:offset + per_page])
+
+    return users, total_pages, total_count
+
+
+@sync_to_async
+def give_user_premium(user_id: int, days: int) -> bool:
+    """Userga premium berish"""
+    from datetime import timedelta
+
+    try:
+        user = User.objects.get(user_id=user_id)
+
+        if user.is_premium_active and user.premium_expires:
+            # Mavjud premiumga qo'shish
+            user.premium_expires = user.premium_expires + timedelta(days=days)
+        else:
+            # Yangi premium
+            user.is_premium = True
+            user.premium_expires = timezone.now() + timedelta(days=days)
+
+        user.save()
+        return True
+    except User.DoesNotExist:
+        return False
+
+
+@sync_to_async
+def unban_user(user_id: int) -> bool:
+    """Userni blokdan chiqarish"""
+    try:
+        user = User.objects.get(user_id=user_id)
+        user.is_banned = False
+        user.ban_reason = None
+        user.save()
+        return True
+    except User.DoesNotExist:
+        return False
+
+
+@sync_to_async
+def get_user_full_info(user_id: int):
+    """User to'liq ma'lumotlarini olish"""
+    try:
+        user = User.objects.get(user_id=user_id)
+        referrals_count = user.referrals.count()
+        return {
+            'user': user,
+            'referrals_count': referrals_count
+        }
+    except User.DoesNotExist:
+        return None

@@ -25,25 +25,25 @@ def get_or_create_user(user_id: int, username: Optional[str], full_name: str, re
         user.full_name = full_name
         user.save(update_fields=['username', 'full_name', 'last_active'])
     elif referral_code and created:
-        # Referal - faqat bog'lash, bonus VAQTINCHA O'CHIRILGAN
+        # Referal bog'lash va bonus berish
         try:
             referrer = User.objects.get(referral_code=referral_code)
             if referrer.user_id != user_id:
                 user.referred_by = referrer
                 user.save(update_fields=['referred_by'])
 
-                # VAQTINCHA O'CHIRILGAN - Referrer'ga bonus berilmaydi
-                # settings = BotSettings.get_settings()
-                # if settings.referral_active and settings.referral_bonus > 0:
-                #     bonus_days = settings.referral_bonus
-                #     if referrer.free_trial_expires:
-                #         if referrer.free_trial_expires > timezone.now():
-                #             referrer.free_trial_expires += timedelta(days=bonus_days)
-                #         else:
-                #             referrer.free_trial_expires = timezone.now() + timedelta(days=bonus_days)
-                #     else:
-                #         referrer.free_trial_expires = timezone.now() + timedelta(days=bonus_days)
-                #     referrer.save(update_fields=['free_trial_expires'])
+                # Referrer'ga bonus berish
+                settings = BotSettings.get_settings()
+                if settings.referral_active and settings.referral_bonus > 0:
+                    bonus_days = settings.referral_bonus
+                    if referrer.free_trial_expires:
+                        if referrer.free_trial_expires > timezone.now():
+                            referrer.free_trial_expires += timedelta(days=bonus_days)
+                        else:
+                            referrer.free_trial_expires = timezone.now() + timedelta(days=bonus_days)
+                    else:
+                        referrer.free_trial_expires = timezone.now() + timedelta(days=bonus_days)
+                    referrer.save(update_fields=['free_trial_expires'])
 
         except User.DoesNotExist:
             pass
@@ -106,3 +106,28 @@ def update_user_joined_channel(user_id: int, channel_id: int):
             user.save(update_fields=['joined_from_channel_id'])
     except User.DoesNotExist:
         pass
+
+
+@sync_to_async
+def record_channel_subscriptions(user_id: int, channel_ids: list):
+    """Foydalanuvchining kanal obunalarini yozish"""
+    from apps.channels.models import ChannelSubscription
+
+    try:
+        user = User.objects.get(user_id=user_id)
+
+        for channel_id in channel_ids:
+            # get_or_create - takroriy yozilmasligi uchun
+            ChannelSubscription.objects.get_or_create(
+                channel_id=channel_id,
+                user=user
+            )
+    except User.DoesNotExist:
+        pass
+
+
+@sync_to_async
+def get_channel_subscription_count(channel_pk: int) -> int:
+    """Kanal obunachilari sonini olish"""
+    from apps.channels.models import ChannelSubscription
+    return ChannelSubscription.objects.filter(channel_id=channel_pk).count()

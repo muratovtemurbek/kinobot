@@ -9,9 +9,12 @@ def main_menu_inline_kb(is_admin: bool = False) -> InlineKeyboardMarkup:
     builder.row(InlineKeyboardButton(text="🔍 Kino qidirish", callback_data="search"))
     builder.row(
         InlineKeyboardButton(text="🔥 Top filmlar", callback_data="top_movies"),
-        InlineKeyboardButton(text="👤 Profil", callback_data="profile")
+        InlineKeyboardButton(text="❤️ Saqlanganlar", callback_data="saved_movies")
     )
-    builder.row(InlineKeyboardButton(text="💎 Premium olish", callback_data="premium"))
+    builder.row(
+        InlineKeyboardButton(text="👤 Profil", callback_data="profile"),
+        InlineKeyboardButton(text="💎 Premium", callback_data="premium")
+    )
 
     # Admin tugmasi
     if is_admin:
@@ -463,8 +466,40 @@ def admin_main_kb() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="💳 To'lovlar", callback_data="admin:payments"),
         InlineKeyboardButton(text="⚙️ Sozlamalar", callback_data="admin:settings")
     )
-    builder.row(InlineKeyboardButton(text="📨 Xabar yuborish", callback_data="admin:broadcast"))
+    builder.row(
+        InlineKeyboardButton(text="📨 Xabar yuborish", callback_data="admin:broadcast"),
+        InlineKeyboardButton(text="✏️ Xabarlar", callback_data="admin:messages")
+    )
     builder.row(InlineKeyboardButton(text="🏠 Asosiy menyu", callback_data="back_to_menu"))
+    return builder.as_markup()
+
+
+def admin_messages_kb(messages: list) -> InlineKeyboardMarkup:
+    """Xabar shablonlari ro'yxati"""
+    builder = InlineKeyboardBuilder()
+
+    for msg in messages:
+        builder.row(InlineKeyboardButton(
+            text=f"✏️ {msg.title}",
+            callback_data=f"edit_msg:{msg.message_type}"
+        ))
+
+    builder.row(InlineKeyboardButton(text="🔄 Barcha xabarlarni tiklash", callback_data="reset_messages"))
+    builder.row(InlineKeyboardButton(text="⬅️ Orqaga", callback_data="admin:panel"))
+
+    return builder.as_markup()
+
+
+def admin_stats_kb() -> InlineKeyboardMarkup:
+    """Statistika menyusi"""
+    builder = InlineKeyboardBuilder()
+
+    builder.row(InlineKeyboardButton(text="📈 Bugungi statistika", callback_data="stats:today"))
+    builder.row(InlineKeyboardButton(text="📊 Haftalik statistika", callback_data="stats:week"))
+    builder.row(InlineKeyboardButton(text="📉 Oylik statistika", callback_data="stats:month"))
+    builder.row(InlineKeyboardButton(text="💎 Premium statistika", callback_data="stats:premium"))
+    builder.row(InlineKeyboardButton(text="⬅️ Orqaga", callback_data="admin:panel"))
+
     return builder.as_markup()
 
 

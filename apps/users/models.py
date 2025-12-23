@@ -63,11 +63,13 @@ class User(models.Model):
     def save(self, *args, **kwargs):
         if not self.referral_code:
             self.referral_code = self._generate_referral_code()
-        # VAQTINCHA O'CHIRILGAN - Yangi userlarga trial berilmaydi
-        # if not self.free_trial_expires and not self.pk:
-        #     from apps.core.models import BotSettings
-        #     settings = BotSettings.get_settings()
-        #     self.free_trial_expires = timezone.now() + timezone.timedelta(days=settings.free_trial_days)
+        # Yangi userlarga trial berish
+        if not self.free_trial_expires and not self.pk:
+            from apps.core.models import BotSettings
+            from datetime import timedelta
+            settings = BotSettings.get_settings()
+            if settings.free_trial_days > 0:
+                self.free_trial_expires = timezone.now() + timedelta(days=settings.free_trial_days)
         super().save(*args, **kwargs)
 
     def _generate_referral_code(self):
@@ -78,12 +80,10 @@ class User(models.Model):
 
     @property
     def is_trial_active(self):
-        """Trial hali aktivmi - VAQTINCHA O'CHIRILGAN"""
-        # TODO: Qayta yoqish uchun quyidagi kodni ishlatish:
-        # if self.free_trial_expires:
-        #     return timezone.now() < self.free_trial_expires
-        # return False
-        return False  # Trial o'chirilgan
+        """Trial hali aktivmi"""
+        if self.free_trial_expires:
+            return timezone.now() < self.free_trial_expires
+        return False
 
     @property
     def is_premium_active(self):
@@ -113,22 +113,32 @@ class User(models.Model):
         """Taklif qilganlar soni"""
         return self.referrals.count()
 
+    def _get_discount_duration(self):
+        """Chegirma muddatini olish (sekundda)"""
+        try:
+            from apps.core.models import BotSettings
+            settings = BotSettings.get_settings()
+            return settings.discount_duration
+        except Exception:
+            return 180  # Default 3 daqiqa
+
     @property
     def is_flash_sale_active(self):
-        """3 daqiqa ichida chegirma aktivmi"""
+        """Chegirma vaqti ichidami"""
         if not self.premium_first_view:
             return True  # Hali ko'rmagan - birinchi marta
-        # 3 daqiqa = 180 sekund
+        duration = self._get_discount_duration()
         time_passed = (timezone.now() - self.premium_first_view).total_seconds()
-        return time_passed <= 180  # 3 daqiqa
+        return time_passed <= duration
 
     @property
     def flash_sale_seconds_left(self):
         """Flash sale uchun qancha vaqt qoldi (sekundda)"""
+        duration = self._get_discount_duration()
         if not self.premium_first_view:
-            return 180  # 3 daqiqa
+            return duration
         time_passed = (timezone.now() - self.premium_first_view).total_seconds()
-        remaining = 180 - time_passed
+        remaining = duration - time_passed
         return max(0, int(remaining))
 
 
