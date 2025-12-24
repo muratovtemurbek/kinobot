@@ -16,6 +16,11 @@ _admin_cache = TTLCache(maxsize=100, ttl=300)
 class DatabaseMiddleware(BaseMiddleware):
     """Database middleware - optimized for speed"""
 
+    # /start va /help buyruqlari har doim ishlashi kerak
+    ALWAYS_ALLOWED_COMMANDS = {'/start', '/help'}
+    # Obuna tekshirish callback'i ham har doim ishlashi kerak
+    ALWAYS_ALLOWED_CALLBACKS = {'check_subscription'}
+
     async def __call__(
         self,
         handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
@@ -32,7 +37,15 @@ class DatabaseMiddleware(BaseMiddleware):
             # Fast settings check from cache
             settings = await self._get_settings_cached()
 
-            if not settings.is_active:
+            # /start va /help har doim ishlashi kerak (bot o'chirilgan bo'lsa ham)
+            is_allowed = False
+            if isinstance(event, Message) and event.text:
+                cmd = event.text.split()[0]
+                is_allowed = cmd in self.ALWAYS_ALLOWED_COMMANDS
+            elif isinstance(event, CallbackQuery) and event.data:
+                is_allowed = event.data in self.ALWAYS_ALLOWED_CALLBACKS
+
+            if not settings.is_active and not is_allowed:
                 # Admin tekshirish - adminlar bot o'chirilgan bo'lsa ham ishlata oladi
                 is_admin = await self._is_admin_cached(user.id)
                 if not is_admin:

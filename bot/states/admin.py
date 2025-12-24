@@ -49,3 +49,20 @@ class EditMessageState(StatesGroup):
 class UserSearchState(StatesGroup):
     """User qidirish holatlari"""
     query = State()
+
+
+class MovieSearchState(StatesGroup):
+    """Kino qidirish holatlari"""
+    query = State()
+
+
+class AddCategoryState(StatesGroup):
+    """Janr qo'shish holatlari"""
+    name = State()
+    emoji = State()
+
+
+class EditCategoryState(StatesGroup):
+    """Janrni tahrirlash holatlari"""
+    name = State()
+    emoji = State()

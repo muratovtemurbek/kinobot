@@ -1,17 +1,17 @@
 from aiogram import Router, F, Bot
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from asgiref.sync import sync_to_async
 from django.utils import timezone
-from django.db.models import Count, Sum
+from django.db.models import Count, Sum, Max
 
 from apps.users.models import User, Admin
 from apps.movies.models import Movie, Category
 from apps.payments.models import Payment
 from apps.core.models import Broadcast
 from bot.filters import IsAdmin, CanAddMovies, CanBroadcast, CanManageUsers, CanManagePayments, IsSuperAdmin
-from bot.states import AddMovieState, BroadcastState, AddChannelState, EditSettingsState, EditMessageState
+from bot.states import AddMovieState, BroadcastState, AddChannelState, EditSettingsState, EditMessageState, UserSearchState, AddCategoryState, EditCategoryState
 from bot.keyboards import (
     admin_categories_kb, movie_quality_kb, movie_language_kb, movie_country_kb,
     broadcast_target_kb, broadcast_ad_kb, confirm_broadcast_kb,
@@ -816,6 +816,386 @@ async def cancel_handler_old(event, state: FSMContext):
     if isinstance(event, CallbackQuery):
         await event.message.edit_text("❌ Bekor qilindi.", reply_markup=admin_main_kb())
         await event.answer()
+
+
+# ==================== JANRLAR (KATEGORIYALAR) ====================
+
+@router.callback_query(F.data == "admin:categories", IsAdmin())
+async def categories_menu(callback: CallbackQuery):
+    """Janrlar menyusi"""
+    categories = await get_all_categories()
+
+    from aiogram.types import InlineKeyboardButton
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+    builder = InlineKeyboardBuilder()
+
+    if categories:
+        for cat in categories:
+            status = "✅" if cat.is_active else "❌"
+            emoji = cat.emoji or "🎬"
+            movies_count = await get_category_movies_count(cat.id)
+            builder.row(InlineKeyboardButton(
+                text=f"{status} {emoji} {cat.name} ({movies_count})",
+                callback_data=f"cat:view:{cat.id}"
+            ))
+
+    builder.row(InlineKeyboardButton(text="➕ Janr qo'shish", callback_data="cat:add"))
+    builder.row(InlineKeyboardButton(text="⬅️ Orqaga", callback_data="admin:panel"))
+
+    text = "🎭 <b>Janrlar boshqaruvi</b>\n\n"
+    if categories:
+        text += f"Jami: {len(categories)} ta janr\n"
+        text += "Janrni bosib tahrirlang."
+    else:
+        text += "📭 Hozircha janrlar yo'q.\n➕ Janr qo'shish tugmasini bosing."
+
+    await callback.message.edit_text(text, reply_markup=builder.as_markup())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "cat:add", IsAdmin())
+async def add_category_start(callback: CallbackQuery, state: FSMContext):
+    """Janr qo'shishni boshlash"""
+    await state.set_state(AddCategoryState.name)
+    await callback.message.edit_text(
+        "🎭 <b>Yangi janr qo'shish</b>\n\n"
+        "Janr nomini kiriting:\n"
+        "Masalan: <code>Komediya</code>",
+        reply_markup=cancel_inline_kb()
+    )
+    await callback.answer()
+
+
+@router.message(AddCategoryState.name, F.text)
+async def add_category_name(message: Message, state: FSMContext):
+    """Janr nomi"""
+    name = message.text.strip()
+
+    if len(name) < 2:
+        await message.answer(
+            "❌ Janr nomi kamida 2 ta harfdan iborat bo'lishi kerak!",
+            reply_markup=cancel_inline_kb()
+        )
+        return
+
+    # Mavjudligini tekshirish
+    exists = await check_category_exists(name)
+    if exists:
+        await message.answer(
+            f"❌ <b>{name}</b> nomli janr allaqachon mavjud!",
+            reply_markup=cancel_inline_kb()
+        )
+        return
+
+    await state.update_data(name=name)
+    await state.set_state(AddCategoryState.emoji)
+
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⏭ O'tkazib yuborish", callback_data="cat:skip_emoji")],
+        [InlineKeyboardButton(text="❌ Bekor qilish", callback_data="cancel")]
+    ])
+
+    await message.answer(
+        f"✅ Nom: <b>{name}</b>\n\n"
+        "Janr uchun emoji kiriting:\n"
+        "Masalan: 😂 🎬 🔥 💀",
+        reply_markup=kb
+    )
+
+
+@router.message(AddCategoryState.emoji, F.text)
+async def add_category_emoji(message: Message, state: FSMContext):
+    """Janr emoji"""
+    emoji = message.text.strip()
+
+    if len(emoji) > 5:
+        await message.answer(
+            "❌ Emoji juda uzun! Faqat 1-2 ta emoji kiriting.",
+            reply_markup=cancel_inline_kb()
+        )
+        return
+
+    data = await state.get_data()
+    await state.clear()
+
+    # Janrni saqlash
+    category = await create_category(data['name'], emoji)
+
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Yana qo'shish", callback_data="cat:add")],
+        [InlineKeyboardButton(text="🎭 Janrlar", callback_data="admin:categories")],
+        [InlineKeyboardButton(text="⬅️ Admin panel", callback_data="admin:panel")]
+    ])
+
+    await message.answer(
+        f"✅ <b>Janr muvaffaqiyatli qo'shildi!</b>\n\n"
+        f"🎭 {emoji} {data['name']}",
+        reply_markup=kb
+    )
+
+
+@router.callback_query(AddCategoryState.emoji, F.data == "cat:skip_emoji")
+async def add_category_skip_emoji(callback: CallbackQuery, state: FSMContext):
+    """Emojini o'tkazib yuborish"""
+    data = await state.get_data()
+    await state.clear()
+
+    # Janrni saqlash (emojisiz)
+    category = await create_category(data['name'], "")
+
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Yana qo'shish", callback_data="cat:add")],
+        [InlineKeyboardButton(text="🎭 Janrlar", callback_data="admin:categories")],
+        [InlineKeyboardButton(text="⬅️ Admin panel", callback_data="admin:panel")]
+    ])
+
+    await callback.message.edit_text(
+        f"✅ <b>Janr muvaffaqiyatli qo'shildi!</b>\n\n"
+        f"🎬 {data['name']}",
+        reply_markup=kb
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("cat:view:"), IsAdmin())
+async def view_category(callback: CallbackQuery):
+    """Janr ma'lumotlari"""
+    cat_id = int(callback.data.split(":")[2])
+    category = await get_category_by_id(cat_id)
+
+    if not category:
+        await callback.answer("❌ Janr topilmadi", show_alert=True)
+        return
+
+    movies_count = await get_category_movies_count(cat_id)
+    status = "✅ Aktiv" if category.is_active else "❌ Noaktiv"
+    emoji = category.emoji or "🎬"
+
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✏️ Tahrirlash", callback_data=f"cat:edit:{cat_id}"),
+            InlineKeyboardButton(
+                text="❌ Noaktiv" if category.is_active else "✅ Aktiv",
+                callback_data=f"cat:toggle:{cat_id}"
+            )
+        ],
+        [InlineKeyboardButton(text="🗑 O'chirish", callback_data=f"cat:delete:{cat_id}")],
+        [InlineKeyboardButton(text="⬅️ Orqaga", callback_data="admin:categories")]
+    ])
+
+    await callback.message.edit_text(
+        f"🎭 <b>Janr ma'lumotlari</b>\n\n"
+        f"📝 Nomi: {emoji} {category.name}\n"
+        f"📊 Holati: {status}\n"
+        f"🎬 Kinolar: {movies_count} ta\n"
+        f"🔢 Tartib: {category.order}",
+        reply_markup=kb
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("cat:toggle:"), IsAdmin())
+async def toggle_category(callback: CallbackQuery):
+    """Janr holatini o'zgartirish"""
+    cat_id = int(callback.data.split(":")[2])
+    result = await toggle_category_status(cat_id)
+
+    if result:
+        await callback.answer("✅ Holat o'zgartirildi!")
+        # Qayta ko'rsatish
+        await view_category(callback)
+    else:
+        await callback.answer("❌ Xatolik!", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("cat:edit:"), IsAdmin())
+async def edit_category_start(callback: CallbackQuery, state: FSMContext):
+    """Janrni tahrirlash"""
+    cat_id = int(callback.data.split(":")[2])
+    category = await get_category_by_id(cat_id)
+
+    if not category:
+        await callback.answer("❌ Janr topilmadi", show_alert=True)
+        return
+
+    await state.set_state(EditCategoryState.name)
+    await state.update_data(category_id=cat_id, old_name=category.name)
+
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⏭ O'zgarishsiz", callback_data="cat:keep_name")],
+        [InlineKeyboardButton(text="❌ Bekor qilish", callback_data="admin:categories")]
+    ])
+
+    await callback.message.edit_text(
+        f"✏️ <b>Janrni tahrirlash</b>\n\n"
+        f"Hozirgi nom: <b>{category.name}</b>\n\n"
+        "Yangi nomni kiriting yoki o'zgarishsiz qoldiring:",
+        reply_markup=kb
+    )
+    await callback.answer()
+
+
+@router.message(EditCategoryState.name, F.text)
+async def edit_category_name(message: Message, state: FSMContext):
+    """Yangi nom"""
+    new_name = message.text.strip()
+    data = await state.get_data()
+
+    if len(new_name) < 2:
+        await message.answer(
+            "❌ Janr nomi kamida 2 ta harfdan iborat bo'lishi kerak!",
+            reply_markup=cancel_inline_kb()
+        )
+        return
+
+    await state.update_data(new_name=new_name)
+    await state.set_state(EditCategoryState.emoji)
+
+    category = await get_category_by_id(data['category_id'])
+    current_emoji = category.emoji if category else ""
+
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⏭ O'zgarishsiz", callback_data="cat:keep_emoji")],
+        [InlineKeyboardButton(text="❌ Bekor qilish", callback_data="admin:categories")]
+    ])
+
+    await message.answer(
+        f"✅ Yangi nom: <b>{new_name}</b>\n\n"
+        f"Hozirgi emoji: {current_emoji or 'Yo`q'}\n"
+        "Yangi emoji kiriting yoki o'zgarishsiz qoldiring:",
+        reply_markup=kb
+    )
+
+
+@router.callback_query(EditCategoryState.name, F.data == "cat:keep_name")
+async def keep_category_name(callback: CallbackQuery, state: FSMContext):
+    """Nomni o'zgarishsiz qoldirish"""
+    data = await state.get_data()
+    await state.update_data(new_name=data['old_name'])
+    await state.set_state(EditCategoryState.emoji)
+
+    category = await get_category_by_id(data['category_id'])
+    current_emoji = category.emoji if category else ""
+
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⏭ O'zgarishsiz", callback_data="cat:keep_emoji")],
+        [InlineKeyboardButton(text="❌ Bekor qilish", callback_data="admin:categories")]
+    ])
+
+    await callback.message.edit_text(
+        f"✅ Nom: <b>{data['old_name']}</b> (o'zgarishsiz)\n\n"
+        f"Hozirgi emoji: {current_emoji or 'Yo`q'}\n"
+        "Yangi emoji kiriting yoki o'zgarishsiz qoldiring:",
+        reply_markup=kb
+    )
+    await callback.answer()
+
+
+@router.message(EditCategoryState.emoji, F.text)
+async def edit_category_emoji(message: Message, state: FSMContext):
+    """Yangi emoji"""
+    new_emoji = message.text.strip()
+    data = await state.get_data()
+
+    if len(new_emoji) > 5:
+        await message.answer("❌ Emoji juda uzun!", reply_markup=cancel_inline_kb())
+        return
+
+    await state.clear()
+
+    # Saqlash
+    await update_category(data['category_id'], data['new_name'], new_emoji)
+
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎭 Janrlar", callback_data="admin:categories")],
+        [InlineKeyboardButton(text="⬅️ Admin panel", callback_data="admin:panel")]
+    ])
+
+    await message.answer(
+        f"✅ <b>Janr yangilandi!</b>\n\n"
+        f"🎭 {new_emoji} {data['new_name']}",
+        reply_markup=kb
+    )
+
+
+@router.callback_query(EditCategoryState.emoji, F.data == "cat:keep_emoji")
+async def keep_category_emoji(callback: CallbackQuery, state: FSMContext):
+    """Emojini o'zgarishsiz qoldirish"""
+    data = await state.get_data()
+    await state.clear()
+
+    category = await get_category_by_id(data['category_id'])
+    old_emoji = category.emoji if category else ""
+
+    # Faqat nomni yangilash
+    await update_category(data['category_id'], data['new_name'], old_emoji)
+
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎭 Janrlar", callback_data="admin:categories")],
+        [InlineKeyboardButton(text="⬅️ Admin panel", callback_data="admin:panel")]
+    ])
+
+    await callback.message.edit_text(
+        f"✅ <b>Janr yangilandi!</b>\n\n"
+        f"🎭 {old_emoji} {data['new_name']}",
+        reply_markup=kb
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("cat:delete:"), IsAdmin())
+async def delete_category_confirm(callback: CallbackQuery):
+    """Janrni o'chirish - tasdiqlash"""
+    cat_id = int(callback.data.split(":")[2])
+    category = await get_category_by_id(cat_id)
+
+    if not category:
+        await callback.answer("❌ Janr topilmadi", show_alert=True)
+        return
+
+    movies_count = await get_category_movies_count(cat_id)
+
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Ha, o'chirish", callback_data=f"cat:delete_confirm:{cat_id}"),
+            InlineKeyboardButton(text="❌ Yo'q", callback_data=f"cat:view:{cat_id}")
+        ]
+    ])
+
+    warning = ""
+    if movies_count > 0:
+        warning = f"\n\n⚠️ Bu janrda {movies_count} ta kino bor. O'chirilganda kinolarning janri yo'qoladi."
+
+    await callback.message.edit_text(
+        f"🗑 <b>Janrni o'chirish</b>\n\n"
+        f"Rostdan ham <b>{category.name}</b> janrini o'chirmoqchimisiz?{warning}",
+        reply_markup=kb
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("cat:delete_confirm:"), IsAdmin())
+async def delete_category_execute(callback: CallbackQuery):
+    """Janrni o'chirish"""
+    cat_id = int(callback.data.split(":")[2])
+    result = await delete_category(cat_id)
+
+    if result:
+        await callback.answer("✅ Janr o'chirildi!")
+        await categories_menu(callback)
+    else:
+        await callback.answer("❌ Xatolik!", show_alert=True)
 
 
 # ==================== XABAR YUBORISH ====================
@@ -1683,14 +2063,9 @@ async def users_search_prompt(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-@router.message(F.text, CanManageUsers())
+@router.message(UserSearchState.query, F.text, CanManageUsers())
 async def users_search_handler(message: Message, state: FSMContext):
     """User qidirish natijasi"""
-    from bot.states import UserSearchState
-
-    current_state = await state.get_state()
-    if current_state != UserSearchState.query:
-        return
 
     await state.clear()
 
@@ -3160,3 +3535,87 @@ def get_user_full_info(user_id: int):
         }
     except User.DoesNotExist:
         return None
+
+
+# ==================== KATEGORIYA FUNKSIYALARI ====================
+
+@sync_to_async
+def get_all_categories():
+    """Barcha kategoriyalarni olish (aktiv va noaktiv)"""
+    return list(Category.objects.all().order_by('order', 'name'))
+
+
+@sync_to_async
+def get_category_movies_count(category_id: int) -> int:
+    """Kategoriyaga tegishli kinolar sonini olish"""
+    return Movie.objects.filter(category_id=category_id).count()
+
+
+@sync_to_async
+def check_category_exists(name: str) -> bool:
+    """Kategoriya mavjudligini tekshirish"""
+    return Category.objects.filter(name__iexact=name).exists()
+
+
+@sync_to_async
+def create_category(name: str, emoji: str = ""):
+    """Yangi kategoriya yaratish"""
+    from django.utils.text import slugify
+
+    # Slug yaratish
+    base_slug = slugify(name)
+    if not base_slug:
+        base_slug = f"category-{Category.objects.count() + 1}"
+
+    slug = base_slug
+    counter = 1
+    while Category.objects.filter(slug=slug).exists():
+        slug = f"{base_slug}-{counter}"
+        counter += 1
+
+    # Tartib raqamini aniqlash
+    max_order = Category.objects.aggregate(max_order=Max('order'))['max_order'] or 0
+
+    return Category.objects.create(
+        name=name,
+        emoji=emoji,
+        slug=slug,
+        order=max_order + 1,
+        is_active=True
+    )
+
+
+@sync_to_async
+def update_category(category_id: int, name: str, emoji: str) -> bool:
+    """Kategoriyani yangilash"""
+    try:
+        category = Category.objects.get(id=category_id)
+        category.name = name
+        category.emoji = emoji
+        category.save(update_fields=['name', 'emoji'])
+        return True
+    except Category.DoesNotExist:
+        return False
+
+
+@sync_to_async
+def toggle_category_status(category_id: int) -> bool:
+    """Kategoriya holatini o'zgartirish"""
+    try:
+        category = Category.objects.get(id=category_id)
+        category.is_active = not category.is_active
+        category.save(update_fields=['is_active'])
+        return True
+    except Category.DoesNotExist:
+        return False
+
+
+@sync_to_async
+def delete_category(category_id: int) -> bool:
+    """Kategoriyani o'chirish"""
+    try:
+        category = Category.objects.get(id=category_id)
+        category.delete()
+        return True
+    except Category.DoesNotExist:
+        return False

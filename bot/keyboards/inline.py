@@ -8,7 +8,7 @@ def main_menu_inline_kb(is_admin: bool = False) -> InlineKeyboardMarkup:
 
     builder.row(InlineKeyboardButton(text="🔍 Kino qidirish", callback_data="search"))
     builder.row(
-        InlineKeyboardButton(text="🔥 Top filmlar", callback_data="top_movies"),
+        InlineKeyboardButton(text="💎 Premium filmlar", callback_data="premium_movies"),
         InlineKeyboardButton(text="❤️ Saqlanganlar", callback_data="saved_movies")
     )
     builder.row(
@@ -355,10 +355,11 @@ def cancel_inline_kb() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def search_filter_kb(channel_link: str = None, channel_name: str = None) -> InlineKeyboardMarkup:
+def search_filter_kb() -> InlineKeyboardMarkup:
     """Qidiruv filtrlari"""
     builder = InlineKeyboardBuilder()
 
+    builder.row(InlineKeyboardButton(text="🔤 Nom bo'yicha qidirish", switch_inline_query_current_chat=""))
     builder.row(InlineKeyboardButton(text="🎬 Barcha kinolar", callback_data="all_movies"))
     builder.row(
         InlineKeyboardButton(text="📂 Janr", callback_data="filter:category"),
@@ -369,14 +370,6 @@ def search_filter_kb(channel_link: str = None, channel_name: str = None) -> Inli
         InlineKeyboardButton(text="📅 Yil", callback_data="filter:year")
     )
     builder.row(InlineKeyboardButton(text="🎲 Tasodifiy kino", callback_data="random_movie"))
-
-    # Kanal linki (agar mavjud bo'lsa)
-    if channel_link:
-        builder.row(InlineKeyboardButton(
-            text=f"📢 {channel_name or 'Bizning kanal'}",
-            url=channel_link
-        ))
-
     builder.row(InlineKeyboardButton(text="🏠 Bosh menyu", callback_data="back_to_menu"))
 
     return builder.as_markup()
@@ -459,17 +452,18 @@ def admin_main_kb() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="➕ Qo'shish", callback_data="admin:add_movie")
     )
     builder.row(
-        InlineKeyboardButton(text="📢 Kanallar", callback_data="admin:channels"),
-        InlineKeyboardButton(text="👥 Userlar", callback_data="admin:users")
+        InlineKeyboardButton(text="🎭 Janrlar", callback_data="admin:categories"),
+        InlineKeyboardButton(text="📢 Kanallar", callback_data="admin:channels")
     )
     builder.row(
-        InlineKeyboardButton(text="💳 To'lovlar", callback_data="admin:payments"),
-        InlineKeyboardButton(text="⚙️ Sozlamalar", callback_data="admin:settings")
+        InlineKeyboardButton(text="👥 Userlar", callback_data="admin:users"),
+        InlineKeyboardButton(text="💳 To'lovlar", callback_data="admin:payments")
     )
     builder.row(
-        InlineKeyboardButton(text="📨 Xabar yuborish", callback_data="admin:broadcast"),
-        InlineKeyboardButton(text="✏️ Xabarlar", callback_data="admin:messages")
+        InlineKeyboardButton(text="⚙️ Sozlamalar", callback_data="admin:settings"),
+        InlineKeyboardButton(text="📨 Xabar yuborish", callback_data="admin:broadcast")
     )
+    builder.row(InlineKeyboardButton(text="✏️ Xabarlar", callback_data="admin:messages"))
     builder.row(InlineKeyboardButton(text="🏠 Asosiy menyu", callback_data="back_to_menu"))
     return builder.as_markup()
 

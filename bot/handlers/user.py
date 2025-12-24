@@ -1,7 +1,9 @@
 import random
 from aiogram import Router, F, Bot
 from aiogram.filters import CommandStart, Command, StateFilter
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramBadRequest
 from asgiref.sync import sync_to_async
 from cachetools import TTLCache
@@ -18,6 +20,9 @@ from bot.keyboards import (
     flash_sale_tariffs_kb
 )
 from bot.utils import get_or_create_user, format_number, format_date, update_user_joined_channel, record_channel_subscriptions
+from apps.payments.models import PendingPaymentSession
+from datetime import timedelta
+from django.utils import timezone as dj_timezone
 
 
 async def is_user_admin(user_id: int) -> bool:
@@ -182,19 +187,14 @@ async def get_movie_by_code(message: Message, db_user: User = None, bot: Bot = N
     # Obunani tekshirish (middleware dan tashqari qo'shimcha tekshiruv)
     user_id = message.from_user.id
 
-    logger.info(f"Kino kod so'rovi: user_id={user_id}, is_admin={user_id in settings.ADMINS}")
-
     # Admin bo'lmasa tekshirish
     if user_id not in settings.ADMINS:
         # Premium bo'lmasa tekshirish
         is_premium = db_user and db_user.is_premium_active
-        logger.info(f"Premium tekshiruv: db_user={db_user}, is_premium={is_premium}")
 
         if not is_premium:
             clear_subscription_cache(user_id)
             not_subscribed = await check_subscription(bot, user_id)
-
-            logger.info(f"Obuna tekshiruv: not_subscribed={len(not_subscribed) if not_subscribed else 0} ta kanal")
 
             if not_subscribed:
                 await message.answer(
@@ -203,8 +203,6 @@ async def get_movie_by_code(message: Message, db_user: User = None, bot: Bot = N
                     reply_markup=channels_kb(not_subscribed)
                 )
                 return
-    else:
-        logger.info(f"Admin - obuna tekshirilmaydi")
 
     code = message.text.strip()
 
@@ -277,19 +275,66 @@ async def get_movie_by_code(message: Message, db_user: User = None, bot: Bot = N
 # ==================== QIDIRISH ====================
 
 @router.callback_query(F.data == "search")
-async def search_callback(callback: CallbackQuery):
+async def search_callback(callback: CallbackQuery, state: FSMContext):
     """Qidirish"""
-    # Bot sozlamalaridan kanal linkini olish
-    bot_settings = await get_bot_settings()
-    channel_link = bot_settings.channel_link if bot_settings else None
-    channel_name = bot_settings.channel_name if bot_settings else None
+    # State tozalash
+    await state.clear()
 
     await callback.message.edit_text(
         "🔍 <b>Kino qidirish</b>\n\n"
         "Kino kodini yuboring yoki filter tanlang:\n"
         "Masalan: <code>123</code>",
-        reply_markup=search_filter_kb(channel_link=channel_link, channel_name=channel_name)
+        reply_markup=search_filter_kb()
     )
+    await callback.answer()
+
+
+# ==================== NOM BO'YICHA QIDIRISH (Inline mode orqali) ====================
+# Inline mode handler: bot/handlers/inline.py da
+
+@router.callback_query(F.data.startswith("movie_view:"))
+async def movie_view_callback(callback: CallbackQuery, db_user: User = None, bot: Bot = None):
+    """Kino ko'rish (qidiruv natijasidan)"""
+    code = callback.data.split(":")[1]
+
+    movie = await get_movie_by_code_db(code)
+
+    if not movie:
+        await callback.answer("❌ Kino topilmadi.", show_alert=True)
+        return
+
+    # Premium tekshirish
+    if movie.is_premium and db_user and not db_user.is_premium_active and not db_user.is_trial_active:
+        await callback.answer("💎 Bu Premium kino! Premium olish uchun menudagi tugmani bosing.", show_alert=True)
+        return
+
+    # Ko'rishlar sonini oshirish
+    await increment_movie_views(movie.id)
+
+    # Saqlanganmi tekshirish
+    is_saved = await check_movie_saved(callback.from_user.id, movie.code) if db_user else False
+
+    # Kino yuborish
+    try:
+        if movie.file_id:
+            await bot.send_video(
+                chat_id=callback.from_user.id,
+                video=movie.file_id,
+                caption=f"🎬 <b>{movie.display_title}</b>\n\n📝 Kod: <code>{movie.code}</code>",
+                reply_markup=movie_action_kb(movie.code, is_saved)
+            )
+        else:
+            await callback.message.answer(
+                f"🎬 <b>{movie.display_title}</b>\n\n📝 Kod: <code>{movie.code}</code>\n\n⚠️ Video fayl topilmadi.",
+                reply_markup=movie_action_kb(movie.code, is_saved)
+            )
+    except TelegramBadRequest as e:
+        await callback.answer(f"❌ Xatolik: Video yuborib bo'lmadi.", show_alert=True)
+        return
+    except Exception as e:
+        await callback.answer("❌ Xatolik yuz berdi.", show_alert=True)
+        return
+
     await callback.answer()
 
 
@@ -449,6 +494,60 @@ async def top_movies_handler(message: Message):
     await message.answer(text, reply_markup=back_kb())
 
 
+# ==================== PREMIUM KINOLAR ====================
+
+@router.callback_query(F.data.startswith("premium_movies"))
+async def premium_movies_callback(callback: CallbackQuery, db_user: User = None):
+    """Premium kinolar - videolar bilan"""
+    # Sahifa raqamini olish
+    parts = callback.data.split(":")
+    page = int(parts[1]) if len(parts) > 1 else 1
+    per_page = 5
+
+    movies, total_pages = await get_premium_movies_paginated(page, per_page)
+
+    if not movies:
+        await callback.answer("📭 Premium kinolar topilmadi.", show_alert=True)
+        return
+
+    await callback.answer()
+
+    # Eski xabarni o'chirish
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
+    # Sarlavha xabari
+    await callback.message.answer(f"💎 <b>Premium kinolar</b> ({page}/{total_pages})")
+
+    # Videolarni yuborish
+    for movie in movies:
+        try:
+            await callback.message.answer_video(
+                video=movie.file_id,
+                caption=f"📝 Kod: <code>{movie.code}</code>"
+            )
+        except Exception:
+            pass
+
+    # Navigatsiya tugmalari
+    nav_buttons = []
+    if page > 1:
+        nav_buttons.append(InlineKeyboardButton(text="◀️ Oldingi", callback_data=f"premium_movies:{page - 1}"))
+    if page < total_pages:
+        nav_buttons.append(InlineKeyboardButton(text="Keyingi ▶️", callback_data=f"premium_movies:{page + 1}"))
+
+    kb_buttons = []
+    if nav_buttons:
+        kb_buttons.append(nav_buttons)
+    kb_buttons.append([InlineKeyboardButton(text="🏠 Bosh menyu", callback_data="back_to_menu")])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=kb_buttons)
+
+    await callback.message.answer("📄 Sahifa: " + f"{page}/{total_pages}", reply_markup=kb)
+
+
 # ==================== YANGI KINOLAR ====================
 
 @router.callback_query(F.data == "new_movies")
@@ -557,33 +656,72 @@ async def random_movie_handler(message: Message, db_user: User = None, bot: Bot 
 
 @router.callback_query(F.data == "all_movies")
 async def all_movies_callback(callback: CallbackQuery):
-    """Barcha kinolar"""
-    movies, total_pages = await get_all_movies(page=1)
+    """Barcha kinolar - kanalga yo'naltirish"""
+    bot_settings = await get_bot_settings()
 
-    if not movies:
-        await callback.answer("📭 Kinolar topilmadi.", show_alert=True)
-        return
+    if bot_settings and bot_settings.channel_link:
+        channel_name = bot_settings.channel_name or "Kinolar kanali"
+        channel_link = bot_settings.channel_link
 
-    await callback.message.edit_text(
-        "🎬 <b>Barcha kinolar</b>\n\nTanlang:",
-        reply_markup=movies_kb(movies, page=1, total_pages=total_pages)
-    )
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"📢 {channel_name}", url=channel_link)],
+            [InlineKeyboardButton(text="🔙 Orqaga", callback_data="search")]
+        ])
+
+        await callback.message.edit_text(
+            "🎬 <b>Barcha kinolar</b>\n\n"
+            "Barcha kinolarni kanalimizda topishingiz mumkin!\n\n"
+            "👇 Kanalga o'tish uchun tugmani bosing:",
+            reply_markup=kb
+        )
+    else:
+        # Kanal sozlanmagan bo'lsa, eski funksiya
+        movies, total_pages = await get_all_movies(page=1)
+
+        if not movies:
+            await callback.answer("📭 Kinolar topilmadi.", show_alert=True)
+            return
+
+        await callback.message.edit_text(
+            "🎬 <b>Barcha kinolar</b>\n\nTanlang:",
+            reply_markup=movies_kb(movies, page=1, total_pages=total_pages)
+        )
+
     await callback.answer()
 
 
 @router.message(Command("movies"))
 async def all_movies_handler(message: Message):
-    """Barcha kinolar command"""
-    movies, total_pages = await get_all_movies(page=1)
+    """Barcha kinolar command - kanalga yo'naltirish"""
+    bot_settings = await get_bot_settings()
 
-    if not movies:
-        await message.answer("📭 Kinolar topilmadi.")
-        return
+    if bot_settings and bot_settings.channel_link:
+        channel_name = bot_settings.channel_name or "Kinolar kanali"
+        channel_link = bot_settings.channel_link
 
-    await message.answer(
-        "🎬 <b>Barcha kinolar</b>\n\nTanlang:",
-        reply_markup=movies_kb(movies, page=1, total_pages=total_pages)
-    )
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"📢 {channel_name}", url=channel_link)],
+            [InlineKeyboardButton(text="🏠 Bosh menyu", callback_data="back_to_menu")]
+        ])
+
+        await message.answer(
+            "🎬 <b>Barcha kinolar</b>\n\n"
+            "Barcha kinolarni kanalimizda topishingiz mumkin!\n\n"
+            "👇 Kanalga o'tish uchun tugmani bosing:",
+            reply_markup=kb
+        )
+    else:
+        # Kanal sozlanmagan bo'lsa, eski funksiya
+        movies, total_pages = await get_all_movies(page=1)
+
+        if not movies:
+            await message.answer("📭 Kinolar topilmadi.")
+            return
+
+        await message.answer(
+            "🎬 <b>Barcha kinolar</b>\n\nTanlang:",
+            reply_markup=movies_kb(movies, page=1, total_pages=total_pages)
+        )
 
 
 # ==================== KATEGORIYALAR ====================
@@ -872,10 +1010,12 @@ async def flash_tariff_callback(callback: CallbackQuery, db_user: User = None):
         # Chegirmali narx (hozirgi narx)
         price = tariff.price
         price_text = f"{price:,} so'm (chegirmali!)"
+        with_discount = True
     else:
         # 2x narx
         price = tariff.price * 2
         price_text = f"{price:,} so'm"
+        with_discount = False
 
     # Karta ma'lumotlarini olish
     from apps.core.models import BotSettings
@@ -889,10 +1029,47 @@ async def flash_tariff_callback(callback: CallbackQuery, db_user: User = None):
         f"📋 <b>Karta ma'lumotlari:</b>\n"
         f"💳 {settings.card_number if settings else '8600 1234 5678 9012'}\n"
         f"👤 {settings.card_holder if settings else 'CARDHOLDER NAME'}\n\n"
+        f"⚠️ Izoh: Chekda <code>{callback.from_user.id}</code> ni ko'rsating.\n\n"
         f"✅ To'lovni amalga oshiring va chekni yuboring:",
         reply_markup=back_kb()
     )
+
+    # Pending payment saqlash (bu muhim!)
+    await _save_pending_payment_for_flash(
+        callback.from_user.id,
+        tariff_id,
+        price,
+        with_discount
+    )
+
     await callback.answer()
+
+
+@sync_to_async
+def _save_pending_payment_for_flash(user_id: int, tariff_id: int, amount: int, with_discount: bool):
+    """Flash sale uchun pending to'lovni saqlash"""
+    _PENDING_PAYMENT_TIMEOUT = 1800  # 30 daqiqa
+
+    # Eski sessiyalarni tozalash
+    PendingPaymentSession.cleanup_expired()
+
+    try:
+        user = User.objects.get(user_id=user_id)
+        # Eski sessiyani o'chirish
+        PendingPaymentSession.objects.filter(user=user).delete()
+
+        # Yangi sessiya yaratish
+        expires_at = dj_timezone.now() + timedelta(seconds=_PENDING_PAYMENT_TIMEOUT)
+        PendingPaymentSession.objects.create(
+            user=user,
+            tariff_id=tariff_id,
+            amount=amount,
+            is_discounted=with_discount,
+            message_id=0,
+            expires_at=expires_at
+        )
+    except User.DoesNotExist:
+        pass
 
 
 # ==================== PROFIL ====================
@@ -1183,38 +1360,21 @@ async def help_handler(message: Message):
 
 async def check_subscription(bot: Bot, user_id: int) -> list:
     """Kanalga obunani tekshirish"""
-    import logging
-    logger = logging.getLogger(__name__)
-
     channels = await get_active_channels()
     not_subscribed = []
 
-    logger.info(f"Tekshiriladigan kanallar: {len(channels)} ta")
-
     for channel in channels:
-        logger.info(f"Kanal: {channel.title}, ID: {channel.channel_id}, is_checkable: {channel.is_checkable}")
-
         if not channel.is_checkable:
-            logger.info(f"  -> O'tkazib yuborildi (is_checkable=False)")
             continue
 
         try:
             member = await bot.get_chat_member(channel.channel_id, user_id)
-            logger.info(f"  -> Member status: {member.status}")
-
             if member.status in ['left', 'kicked']:
                 not_subscribed.append(channel)
-                logger.info(f"  -> Obuna emas!")
-            else:
-                logger.info(f"  -> Obuna bo'lgan")
-
-        except TelegramBadRequest as e:
-            # Bot kanalda admin emas yoki kanal topilmadi - obuna emas deb hisoblaymiz
-            logger.error(f"  -> XATOLIK: {e}")
+        except TelegramBadRequest:
+            # Bot kanalda admin emas yoki kanal topilmadi
             not_subscribed.append(channel)
-
-        except Exception as e:
-            logger.error(f"  -> Kutilmagan xatolik: {e}")
+        except Exception:
             not_subscribed.append(channel)
 
     return not_subscribed
@@ -1242,8 +1402,38 @@ def get_movie_by_code_db(code):
 
 
 @sync_to_async
+def search_movies_by_name(query: str, limit: int = 10):
+    """Kino nomini qidirish - bosh harfdan boshlab"""
+    from django.db.models import Q
+
+    # Qidiruv - nom boshlanishi yoki ichida bo'lishi
+    return list(
+        Movie.objects.filter(
+            Q(title__icontains=query) | Q(title_uz__icontains=query),
+            is_active=True
+        ).order_by('-views')[:limit]
+    )
+
+
+@sync_to_async
 def get_top_movies(limit=10):
     return list(Movie.objects.filter(is_active=True).order_by('-views')[:limit])
+
+
+@sync_to_async
+def get_premium_movies(limit=10):
+    """Premium kinolarni olish"""
+    return list(Movie.objects.filter(is_active=True, is_premium=True).order_by('-views')[:limit])
+
+
+@sync_to_async
+def get_premium_movies_paginated(page=1, per_page=5):
+    """Premium kinolarni sahifalab olish"""
+    movies = Movie.objects.filter(is_active=True, is_premium=True).order_by('-created_at')
+    total = movies.count()
+    total_pages = max(1, (total + per_page - 1) // per_page)
+    start = (page - 1) * per_page
+    return list(movies[start:start + per_page]), total_pages
 
 
 @sync_to_async

@@ -61,6 +61,9 @@ class Payment(models.Model):
 
     screenshot_file_id = models.CharField(max_length=255, verbose_name='Screenshot File ID')
 
+    # Admin xabarlarini saqlash (xabarni o'chirish uchun)
+    admin_messages = models.JSONField(blank=True, null=True, verbose_name='Admin xabarlari')
+
     admin_note = models.TextField(blank=True, default='', verbose_name='Admin izohi')
     approved_by = models.ForeignKey(
         'users.User',

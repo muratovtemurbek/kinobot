@@ -113,16 +113,24 @@ async def screenshot_handler(message: Message, db_user: User = None, bot: Bot = 
         f"🎁 Chegirma: {'Ha' if pending['with_discount'] else 'Yoq'}\n"
     )
 
+    # Admin xabarlarini saqlash (keyinchalik o'chirish uchun)
+    admin_messages = {}
+
     for admin_id in settings.ADMINS:
         try:
-            await bot.send_photo(
+            msg = await bot.send_photo(
                 chat_id=admin_id,
                 photo=photo.file_id,
                 caption=admin_text,
                 reply_markup=payment_confirm_kb(payment.id)
             )
+            admin_messages[str(admin_id)] = msg.message_id
         except Exception:
             pass
+
+    # Admin xabar ID larni saqlash
+    if admin_messages:
+        await save_admin_messages(payment.id, admin_messages)
 
 
 # ==================== TO'LOVNI TASDIQLASH ====================
@@ -142,16 +150,32 @@ async def approve_payment_callback(callback: CallbackQuery, bot: Bot):
         await callback.answer("⚠️ Bu to'lov allaqachon ko'rib chiqilgan.", show_alert=True)
         return
 
+    # Admin xabarlarini olish (o'chirish uchun)
+    admin_messages = await get_admin_messages(payment_id)
+
     # Tasdiqlash
     await approve_payment(payment_id, callback.from_user.id)
 
     await callback.answer("✅ To'lov tasdiqlandi!")
 
-    # Xabarni yangilash
-    await callback.message.edit_caption(
-        caption=callback.message.caption + "\n\n✅ <b>TASDIQLANDI</b>",
-        reply_markup=None
-    )
+    # Joriy admin xabarini yangilash
+    try:
+        await callback.message.edit_caption(
+            caption=callback.message.caption + "\n\n✅ <b>TASDIQLANDI</b>",
+            reply_markup=None
+        )
+    except Exception:
+        pass
+
+    # Boshqa adminlardan xabarni o'chirish
+    current_admin_id = str(callback.from_user.id)
+    if admin_messages:
+        for admin_id, message_id in admin_messages.items():
+            if admin_id != current_admin_id:
+                try:
+                    await bot.delete_message(chat_id=int(admin_id), message_id=message_id)
+                except Exception:
+                    pass
 
     # User ga xabar
     user = await get_user_by_pk(payment.user_id)
@@ -188,16 +212,32 @@ async def reject_payment_callback(callback: CallbackQuery, bot: Bot):
         await callback.answer("⚠️ Bu to'lov allaqachon ko'rib chiqilgan.", show_alert=True)
         return
 
+    # Admin xabarlarini olish (o'chirish uchun)
+    admin_messages = await get_admin_messages(payment_id)
+
     # Rad etish
     await reject_payment(payment_id)
 
     await callback.answer("❌ To'lov rad etildi!")
 
-    # Xabarni yangilash
-    await callback.message.edit_caption(
-        caption=callback.message.caption + "\n\n❌ <b>RAD ETILDI</b>",
-        reply_markup=None
-    )
+    # Joriy admin xabarini yangilash
+    try:
+        await callback.message.edit_caption(
+            caption=callback.message.caption + "\n\n❌ <b>RAD ETILDI</b>",
+            reply_markup=None
+        )
+    except Exception:
+        pass
+
+    # Boshqa adminlardan xabarni o'chirish
+    current_admin_id = str(callback.from_user.id)
+    if admin_messages:
+        for admin_id, message_id in admin_messages.items():
+            if admin_id != current_admin_id:
+                try:
+                    await bot.delete_message(chat_id=int(admin_id), message_id=message_id)
+                except Exception:
+                    pass
 
     # User ga xabar
     user = await get_user_by_pk(payment.user_id)
@@ -245,6 +285,25 @@ def get_payment(payment_id: int):
         return Payment.objects.get(id=payment_id)
     except Payment.DoesNotExist:
         return None
+
+
+@sync_to_async
+def save_admin_messages(payment_id: int, admin_messages: dict):
+    """Admin xabar ID larni saqlash"""
+    try:
+        Payment.objects.filter(id=payment_id).update(admin_messages=admin_messages)
+    except Exception:
+        pass
+
+
+@sync_to_async
+def get_admin_messages(payment_id: int) -> dict:
+    """Admin xabar ID larni olish"""
+    try:
+        payment = Payment.objects.get(id=payment_id)
+        return payment.admin_messages or {}
+    except Payment.DoesNotExist:
+        return {}
 
 
 @sync_to_async
