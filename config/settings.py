@@ -71,9 +71,7 @@ if DATABASE_URL:
     DATABASES = {
         'default': dj_database_url.config(
             default=DATABASE_URL,
-            conn_max_age=600,
-            conn_health_checks=True,
-            ssl_require=not DEBUG,
+            conn_max_age=0,  # Railway uchun connection pooling o'chirish
         )
     }
 elif os.getenv('USE_POSTGRES', 'False').lower() in ('true', '1', 'yes'):
