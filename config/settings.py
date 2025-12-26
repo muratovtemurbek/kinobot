@@ -100,14 +100,19 @@ else:
         }
     }
 
-if os.getenv('USE_REDIS', 'False').lower() in ('true', '1', 'yes'):
+# Redis faqat REDIS_URL mavjud bo'lganda ishlatiladi
+REDIS_URL = os.getenv('REDIS_URL')
+USE_REDIS = os.getenv('USE_REDIS', 'False').lower() in ('true', '1', 'yes')
+
+if USE_REDIS and REDIS_URL and not REDIS_URL.startswith('redis://localhost'):
     CACHES = {
         'default': {
             'BACKEND': 'django.core.cache.backends.redis.RedisCache',
-            'LOCATION': os.getenv('REDIS_URL', 'redis://localhost:6379/0'),
+            'LOCATION': REDIS_URL,
         }
     }
 else:
+    # Local memory cache - Redis yo'q bo'lsa
     CACHES = {
         'default': {
             'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
