@@ -20,6 +20,7 @@ PORT = os.getenv('PORT', '8000')
 bot_process = None
 gunicorn_process = None
 
+
 def signal_handler(sig, frame):
     """Handle shutdown signals"""
     print("Shutting down...")
@@ -28,6 +29,7 @@ def signal_handler(sig, frame):
     if gunicorn_process:
         gunicorn_process.terminate()
     sys.exit(0)
+
 
 def check_environment():
     """Check required environment variables"""
@@ -46,8 +48,26 @@ def check_environment():
 
     print(f"  BOT_TOKEN: {'***' + bot_token[-10:] if len(bot_token) > 10 else '(not set)'}")
     print(f"  ADMINS: {admins if admins else '(not set)'}")
-    print(f"  DATABASE_URL: {'configured' if db_url else 'using SQLite'}")
+    print(f"  DATABASE_URL: {'configured (PostgreSQL)' if db_url else 'using SQLite'}")
     print(f"  PORT: {PORT}")
+
+
+def check_database_connection():
+    """Check database connection before starting"""
+    print("Checking database connection...")
+    try:
+        import django
+        django.setup()
+        from django.db import connection
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT 1")
+        print("Database connection: OK")
+        return True
+    except Exception as e:
+        print(f"Database connection ERROR: {e}")
+        print("Continuing anyway - bot may have limited functionality")
+        return False
+
 
 def run_migrations():
     """Run Django migrations"""
@@ -57,14 +77,25 @@ def run_migrations():
             [sys.executable, 'manage.py', 'migrate', '--noinput'],
             capture_output=True,
             text=True,
-            timeout=60
+            timeout=120  # 2 daqiqa timeout
         )
         if result.returncode == 0:
             print("Migrations completed successfully!")
+            if result.stdout:
+                # Faqat yangi migratsiyalarni ko'rsatish
+                for line in result.stdout.split('\n'):
+                    if 'Applying' in line or 'No migrations' in line:
+                        print(f"  {line}")
+            return True
         else:
             print(f"Migration warning: {result.stderr}")
+            return False
+    except subprocess.TimeoutExpired:
+        print("Migration timeout - continuing anyway")
+        return False
     except Exception as e:
-        print(f"Migration error (non-fatal): {e}")
+        print(f"Migration error: {e}")
+        return False
 
 def wait_for_gunicorn(max_retries=30):
     """Wait for gunicorn to be ready"""
@@ -101,8 +132,14 @@ if __name__ == '__main__':
     # Check environment
     check_environment()
 
-    # Run migrations
-    run_migrations()
+    # Check database connection
+    db_ok = check_database_connection()
+
+    # Run migrations (faqat database ishlayotgan bo'lsa)
+    if db_ok:
+        run_migrations()
+    else:
+        print("Skipping migrations due to database connection issues")
 
     # Start gunicorn FIRST (for health check)
     print(f"\nStarting Django/Gunicorn on port {PORT}...")

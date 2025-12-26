@@ -68,11 +68,18 @@ WSGI_APPLICATION = 'config.wsgi.application'
 DATABASE_URL = os.getenv('DATABASE_URL')
 
 if DATABASE_URL:
+    # Railway PostgreSQL configuration
     DATABASES = {
         'default': dj_database_url.config(
             default=DATABASE_URL,
             conn_max_age=0,  # Railway uchun connection pooling o'chirish
+            conn_health_checks=True,
+            ssl_require=True,  # Railway PostgreSQL SSL talab qiladi
         )
+    }
+    # SSL sozlamalari
+    DATABASES['default']['OPTIONS'] = {
+        'sslmode': 'require',
     }
 elif os.getenv('USE_POSTGRES', 'False').lower() in ('true', '1', 'yes'):
     DATABASES = {
@@ -125,7 +132,8 @@ STATIC_ROOT = BASE_DIR / 'staticfiles'
 STATICFILES_DIRS = [BASE_DIR / 'static'] if (BASE_DIR / 'static').exists() else []
 
 # Whitenoise for static files
-STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
+# CompressedStaticFilesStorage - manifest xatolarini oldini oladi
+STATICFILES_STORAGE = 'whitenoise.storage.CompressedStaticFilesStorage'
 
 MEDIA_URL = 'media/'
 MEDIA_ROOT = BASE_DIR / 'media'
