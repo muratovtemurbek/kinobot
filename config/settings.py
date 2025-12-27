@@ -1,4 +1,6 @@
 import os
+import sys
+import logging
 from pathlib import Path
 from dotenv import load_dotenv
 import dj_database_url
@@ -7,11 +9,26 @@ load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-change-me-in-production')
+# Security: SECRET_KEY must be set in production
+SECRET_KEY = os.getenv('SECRET_KEY')
+if not SECRET_KEY:
+    if os.getenv('DEBUG', 'True').lower() in ('true', '1', 'yes'):
+        SECRET_KEY = 'django-insecure-dev-only-key-do-not-use-in-production'
+        logging.warning("WARNING: Using insecure SECRET_KEY. Set SECRET_KEY in .env for production!")
+    else:
+        raise ValueError("SECRET_KEY environment variable must be set in production!")
 
 DEBUG = os.getenv('DEBUG', 'True').lower() in ('true', '1', 'yes')
 
-ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', '*').split(',')
+# Security: Don't allow all hosts in production
+_allowed_hosts = os.getenv('ALLOWED_HOSTS', '')
+if _allowed_hosts:
+    ALLOWED_HOSTS = [h.strip() for h in _allowed_hosts.split(',') if h.strip()]
+else:
+    if DEBUG:
+        ALLOWED_HOSTS = ['localhost', '127.0.0.1', '[::1]']
+    else:
+        ALLOWED_HOSTS = ['.railway.app']  # Railway default
 
 # Railway specific
 CSRF_TRUSTED_ORIGINS = os.getenv('CSRF_TRUSTED_ORIGINS', '').split(',') if os.getenv('CSRF_TRUSTED_ORIGINS') else []

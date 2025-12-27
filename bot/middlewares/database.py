@@ -1,3 +1,4 @@
+import logging
 from typing import Callable, Dict, Any, Awaitable
 from aiogram import BaseMiddleware
 from aiogram.types import TelegramObject, Message, CallbackQuery
@@ -7,10 +8,17 @@ from django.core.cache import cache
 from django.conf import settings as django_settings
 from cachetools import TTLCache
 
-# Local cache for faster access
-_user_cache = TTLCache(maxsize=1000, ttl=60)
-_settings_cache = TTLCache(maxsize=1, ttl=300)
-_admin_cache = TTLCache(maxsize=100, ttl=300)
+from bot.constants import (
+    CACHE_TTL_USER, CACHE_TTL_SETTINGS, CACHE_TTL_ADMIN,
+    CACHE_MAX_USERS, CACHE_MAX_ADMINS
+)
+
+logger = logging.getLogger(__name__)
+
+# Local cache for faster access - constants dan qiymatlar
+_user_cache = TTLCache(maxsize=CACHE_MAX_USERS, ttl=CACHE_TTL_USER)
+_settings_cache = TTLCache(maxsize=1, ttl=CACHE_TTL_SETTINGS)
+_admin_cache = TTLCache(maxsize=CACHE_MAX_ADMINS, ttl=CACHE_TTL_ADMIN)
 
 
 class DatabaseMiddleware(BaseMiddleware):

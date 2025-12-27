@@ -1,7 +1,9 @@
+import logging
 from datetime import timedelta
 from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
+from aiogram.exceptions import TelegramBadRequest
 from asgiref.sync import sync_to_async
 from django.utils import timezone
 from django.conf import settings
@@ -11,6 +13,10 @@ from apps.payments.models import Tariff, Payment, PendingPaymentSession
 from apps.core.models import BotSettings
 from bot.keyboards import tariffs_kb, main_menu_inline_kb, payment_confirm_kb, back_kb
 from bot.filters import CanManagePayments
+
+logger = logging.getLogger(__name__)
+
+from bot.constants import PENDING_PAYMENT_TIMEOUT
 
 router = Router()
 
@@ -125,8 +131,10 @@ async def screenshot_handler(message: Message, db_user: User = None, bot: Bot = 
                 reply_markup=payment_confirm_kb(payment.id)
             )
             admin_messages[str(admin_id)] = msg.message_id
-        except Exception:
-            pass
+        except TelegramBadRequest as e:
+            logger.warning(f"Admin {admin_id} ga to'lov xabari yuborilmadi: {e}")
+        except Exception as e:
+            logger.error(f"Admin {admin_id} ga xabar yuborishda kutilmagan xatolik: {e}")
 
     # Admin xabar ID larni saqlash
     if admin_messages:
@@ -164,8 +172,8 @@ async def approve_payment_callback(callback: CallbackQuery, bot: Bot):
             caption=callback.message.caption + "\n\n✅ <b>TASDIQLANDI</b>",
             reply_markup=None
         )
-    except Exception:
-        pass
+    except TelegramBadRequest as e:
+        logger.debug(f"Admin xabarini yangilashda xatolik: {e}")
 
     # Boshqa adminlardan xabarni o'chirish
     current_admin_id = str(callback.from_user.id)
@@ -174,8 +182,8 @@ async def approve_payment_callback(callback: CallbackQuery, bot: Bot):
             if admin_id != current_admin_id:
                 try:
                     await bot.delete_message(chat_id=int(admin_id), message_id=message_id)
-                except Exception:
-                    pass
+                except TelegramBadRequest as e:
+                    logger.debug(f"Admin xabarini o'chirishda xatolik: {e}")
 
     # User ga xabar
     user = await get_user_by_pk(payment.user_id)
@@ -191,8 +199,8 @@ async def approve_payment_callback(callback: CallbackQuery, bot: Bot):
                 f"Botdan foydalaning! 🎬"
             )
         )
-    except Exception:
-        pass
+    except TelegramBadRequest as e:
+        logger.warning(f"Userga premium xabari yuborilmadi (user_id={user.user_id}): {e}")
 
 
 # ==================== TO'LOVNI RAD ETISH ====================
@@ -226,8 +234,8 @@ async def reject_payment_callback(callback: CallbackQuery, bot: Bot):
             caption=callback.message.caption + "\n\n❌ <b>RAD ETILDI</b>",
             reply_markup=None
         )
-    except Exception:
-        pass
+    except TelegramBadRequest as e:
+        logger.debug(f"Admin xabarini yangilashda xatolik: {e}")
 
     # Boshqa adminlardan xabarni o'chirish
     current_admin_id = str(callback.from_user.id)
@@ -236,8 +244,8 @@ async def reject_payment_callback(callback: CallbackQuery, bot: Bot):
             if admin_id != current_admin_id:
                 try:
                     await bot.delete_message(chat_id=int(admin_id), message_id=message_id)
-                except Exception:
-                    pass
+                except TelegramBadRequest as e:
+                    logger.debug(f"Admin xabarini o'chirishda xatolik: {e}")
 
     # User ga xabar
     user = await get_user_by_pk(payment.user_id)
@@ -250,13 +258,11 @@ async def reject_payment_callback(callback: CallbackQuery, bot: Bot):
                 "Iltimos, to'g'ri chek yuboring yoki admin bilan bog'laning."
             )
         )
-    except Exception:
-        pass
+    except TelegramBadRequest as e:
+        logger.warning(f"Userga rad xabari yuborilmadi (user_id={user.user_id}): {e}")
 
 
 # ==================== HELPER FUNCTIONS ====================
-
-_PENDING_PAYMENT_TIMEOUT = 1800  # 30 daqiqa (sekundlarda)
 
 
 @sync_to_async
@@ -359,7 +365,7 @@ def save_pending_payment(user_id: int, tariff_id: int, amount: int, with_discoun
         PendingPaymentSession.objects.filter(user=user).delete()
 
         # Yangi sessiya yaratish
-        expires_at = timezone.now() + timedelta(seconds=_PENDING_PAYMENT_TIMEOUT)
+        expires_at = timezone.now() + timedelta(seconds=PENDING_PAYMENT_TIMEOUT)
         PendingPaymentSession.objects.create(
             user=user,
             tariff_id=tariff_id,
@@ -369,7 +375,7 @@ def save_pending_payment(user_id: int, tariff_id: int, amount: int, with_discoun
             expires_at=expires_at
         )
     except User.DoesNotExist:
-        pass
+        logger.warning(f"Pending payment saqlashda user topilmadi: {user_id}")
 
 
 @sync_to_async

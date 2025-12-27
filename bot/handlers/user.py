@@ -1,4 +1,5 @@
 import random
+import logging
 from aiogram import Router, F, Bot
 from aiogram.filters import CommandStart, Command, StateFilter
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
@@ -24,6 +25,17 @@ from apps.payments.models import PendingPaymentSession
 from datetime import timedelta
 from django.utils import timezone as dj_timezone
 
+# Logger
+logger = logging.getLogger(__name__)
+
+# Constants import
+from bot.constants import (
+    CACHE_TTL_MOVIES, CACHE_TTL_CATEGORIES, CACHE_TTL_BOT_INFO,
+    CACHE_TTL_SUBSCRIPTION, CACHE_MAX_MOVIES, CACHE_MAX_PENDING_SUBS,
+    DEFAULT_PER_PAGE, PREMIUM_MOVIES_PER_PAGE, TOP_MOVIES_LIMIT,
+    MAX_MOVIE_CODE_LENGTH, PENDING_PAYMENT_TIMEOUT
+)
+
 
 async def is_user_admin(user_id: int) -> bool:
     """Foydalanuvchi adminmi tekshirish"""
@@ -40,13 +52,54 @@ async def is_user_admin(user_id: int) -> bool:
 
 router = Router()
 
-# Cache
-_movies_cache = TTLCache(maxsize=100, ttl=120)
-_categories_cache = TTLCache(maxsize=1, ttl=300)
+# Cache - constants dan qiymatlar
+_movies_cache = TTLCache(maxsize=CACHE_MAX_MOVIES, ttl=CACHE_TTL_MOVIES)
+_categories_cache = TTLCache(maxsize=1, ttl=CACHE_TTL_CATEGORIES)
+_bot_info_cache = TTLCache(maxsize=1, ttl=CACHE_TTL_BOT_INFO)
 
 # Obuna kutayotgan kanallar (user_id -> [channel_ids])
-# Bot orqali obuna bo'lganlarni aniq hisoblash uchun
-_pending_subscriptions = {}
+# TTLCache ishlatamiz - avtomatik tozalanadi (memory leak oldini olish)
+_pending_subscriptions: TTLCache = TTLCache(maxsize=CACHE_MAX_PENDING_SUBS, ttl=CACHE_TTL_SUBSCRIPTION)
+
+
+async def get_bot_link(bot: Bot) -> str:
+    """Bot linkini olish (cached)"""
+    if 'bot_info' in _bot_info_cache:
+        return f"https://t.me/{_bot_info_cache['bot_info'].username}"
+
+    bot_info = await bot.me()
+    _bot_info_cache['bot_info'] = bot_info
+    return f"https://t.me/{bot_info.username}"
+
+
+async def get_bot_username(bot: Bot) -> str:
+    """Bot username'ini olish (cached)"""
+    if 'bot_info' in _bot_info_cache:
+        return _bot_info_cache['bot_info'].username
+
+    bot_info = await bot.me()
+    _bot_info_cache['bot_info'] = bot_info
+    return bot_info.username
+
+
+async def check_user_subscription(bot: Bot, user_id: int, db_user: User = None) -> list:
+    """
+    Foydalanuvchi obunasini tekshirish.
+    Admin yoki premium bo'lsa, bo'sh list qaytaradi.
+    """
+    from bot.middlewares.subscription import clear_subscription_cache
+
+    # Admin tekshirish
+    if user_id in settings.ADMINS:
+        return []
+
+    # Premium tekshirish
+    if db_user and db_user.is_premium_active:
+        return []
+
+    # Cache tozalash va tekshirish
+    clear_subscription_cache(user_id)
+    return await check_subscription(bot, user_id)
 
 
 # ==================== START ====================
@@ -180,31 +233,27 @@ async def back_to_menu_callback(callback: CallbackQuery):
 @router.message(F.text.regexp(r'^\d+$'), StateFilter(None))
 async def get_movie_by_code(message: Message, db_user: User = None, bot: Bot = None):
     """Kod bo'yicha kino olish"""
-    from bot.middlewares.subscription import clear_subscription_cache
-    import logging
-    logger = logging.getLogger(__name__)
-
-    # Obunani tekshirish (middleware dan tashqari qo'shimcha tekshiruv)
     user_id = message.from_user.id
-
-    # Admin bo'lmasa tekshirish
-    if user_id not in settings.ADMINS:
-        # Premium bo'lmasa tekshirish
-        is_premium = db_user and db_user.is_premium_active
-
-        if not is_premium:
-            clear_subscription_cache(user_id)
-            not_subscribed = await check_subscription(bot, user_id)
-
-            if not_subscribed:
-                await message.answer(
-                    "📢 <b>Kino ko'rish uchun kanallarga obuna bo'ling:</b>\n\n"
-                    "Obuna bo'lgach, <b>✅ Tekshirish</b> tugmasini bosing.",
-                    reply_markup=channels_kb(not_subscribed)
-                )
-                return
-
     code = message.text.strip()
+
+    # Input validation - faqat raqamlar va max uzunlik
+    if not code.isdigit() or len(code) > MAX_MOVIE_CODE_LENGTH:
+        await message.answer(
+            "❌ Noto'g'ri kod formati.\n\n"
+            "🔍 Kino kodi faqat raqamlardan iborat bo'lishi kerak.",
+            reply_markup=back_kb()
+        )
+        return
+
+    # Obunani tekshirish (helper funksiya orqali)
+    not_subscribed = await check_user_subscription(bot, user_id, db_user)
+    if not_subscribed:
+        await message.answer(
+            "📢 <b>Kino ko'rish uchun kanallarga obuna bo'ling:</b>\n\n"
+            "Obuna bo'lgach, <b>✅ Tekshirish</b> tugmasini bosing.",
+            reply_markup=channels_kb(not_subscribed)
+        )
+        return
 
     movie = await get_movie_by_code_db(code)
 
@@ -225,7 +274,7 @@ async def get_movie_by_code(message: Message, db_user: User = None, bot: Bot = N
 
     # Premium check
     if movie.is_premium and db_user and not db_user.is_premium_active and not db_user.is_trial_active:
-        is_admin = await is_user_admin(message.from_user.id)
+        is_admin = await is_user_admin(user_id)
         await message.answer(
             f"💎 <b>{movie.display_title}</b>\n\n"
             "Bu kino faqat Premium foydalanuvchilar uchun.\n\n"
@@ -236,8 +285,7 @@ async def get_movie_by_code(message: Message, db_user: User = None, bot: Bot = N
 
     # Send movie
     try:
-        bot_info = await bot.me()
-        bot_link = f"https://t.me/{bot_info.username}"
+        bot_link = await get_bot_link(bot)
 
         desc = f"\n\n📖 {movie.description}" if movie.description else ""
         year_text = f"📅 Yil: {movie.year}\n" if movie.year else ""
@@ -255,7 +303,7 @@ async def get_movie_by_code(message: Message, db_user: User = None, bot: Bot = N
         )
 
         # Saqlangan yoki yo'qligini tekshirish
-        is_saved = await check_movie_saved(message.from_user.id, movie.code) if db_user else False
+        is_saved = await check_movie_saved(user_id, movie.code) if db_user else False
 
         await message.answer_video(
             video=movie.file_id,
@@ -268,7 +316,8 @@ async def get_movie_by_code(message: Message, db_user: User = None, bot: Bot = N
         if db_user:
             await increment_user_movies(db_user.user_id)
 
-    except TelegramBadRequest:
+    except TelegramBadRequest as e:
+        logger.error(f"Kino yuborishda xatolik (code={code}): {e}")
         await message.answer("❌ Kino faylida xatolik.", reply_markup=back_kb())
 
 
@@ -596,23 +645,17 @@ async def last_movies_handler(message: Message):
 @router.message(Command("rand"))
 async def random_movie_handler(message: Message, db_user: User = None, bot: Bot = None):
     """Random kino"""
-    from bot.middlewares.subscription import clear_subscription_cache
-
     user_id = message.from_user.id
 
-    # Obunani tekshirish
-    if user_id not in settings.ADMINS:
-        if not db_user or not db_user.is_premium_active:
-            clear_subscription_cache(user_id)
-            not_subscribed = await check_subscription(bot, user_id)
-
-            if not_subscribed:
-                await message.answer(
-                    "📢 <b>Kino ko'rish uchun kanallarga obuna bo'ling:</b>\n\n"
-                    "Obuna bo'lgach, <b>✅ Tekshirish</b> tugmasini bosing.",
-                    reply_markup=channels_kb(not_subscribed)
-                )
-                return
+    # Obunani tekshirish (helper funksiya orqali)
+    not_subscribed = await check_user_subscription(bot, user_id, db_user)
+    if not_subscribed:
+        await message.answer(
+            "📢 <b>Kino ko'rish uchun kanallarga obuna bo'ling:</b>\n\n"
+            "Obuna bo'lgach, <b>✅ Tekshirish</b> tugmasini bosing.",
+            reply_markup=channels_kb(not_subscribed)
+        )
+        return
 
     movie = await get_random_movie()
 
@@ -621,7 +664,7 @@ async def random_movie_handler(message: Message, db_user: User = None, bot: Bot 
         return
 
     if movie.is_premium and db_user and not db_user.is_premium_active:
-        is_admin = await is_user_admin(message.from_user.id)
+        is_admin = await is_user_admin(user_id)
         await message.answer(
             f"💎 <b>{movie.display_title}</b>\n\n"
             "Premium kino tushdi! Premium olish uchun 💎 Premium tugmasini bosing.",
@@ -630,8 +673,7 @@ async def random_movie_handler(message: Message, db_user: User = None, bot: Bot 
         return
 
     try:
-        bot_info = await bot.me()
-        bot_link = f"https://t.me/{bot_info.username}"
+        bot_link = await get_bot_link(bot)
 
         desc = f"\n📖 {movie.description}" if movie.description else ""
         year_text = f" • 📅 {movie.year}" if movie.year else ""
@@ -648,7 +690,8 @@ async def random_movie_handler(message: Message, db_user: User = None, bot: Bot 
             reply_markup=back_kb()
         )
         await increment_movie_views(movie.id)
-    except TelegramBadRequest:
+    except TelegramBadRequest as e:
+        logger.error(f"Random kino yuborishda xatolik: {e}")
         await message.answer("❌ Xatolik yuz berdi.", reply_markup=back_kb())
 
 
@@ -805,26 +848,25 @@ async def movies_page_callback(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("movie:"))
 async def movie_callback(callback: CallbackQuery, db_user: User = None, bot: Bot = None):
     """Kinoni tanlash"""
-    from bot.middlewares.subscription import clear_subscription_cache
-
     user_id = callback.from_user.id
 
-    # Obunani tekshirish (admin va premium dan tashqari)
-    if user_id not in settings.ADMINS:
-        if not db_user or not db_user.is_premium_active:
-            clear_subscription_cache(user_id)
-            not_subscribed = await check_subscription(bot, user_id)
-
-            if not_subscribed:
-                await callback.answer("❌ Avval kanallarga obuna bo'ling!", show_alert=True)
-                await callback.message.answer(
-                    "📢 <b>Kino ko'rish uchun kanallarga obuna bo'ling:</b>\n\n"
-                    "Obuna bo'lgach, <b>✅ Tekshirish</b> tugmasini bosing.",
-                    reply_markup=channels_kb(not_subscribed)
-                )
-                return
+    # Obunani tekshirish (helper funksiya orqali)
+    not_subscribed = await check_user_subscription(bot, user_id, db_user)
+    if not_subscribed:
+        await callback.answer("❌ Avval kanallarga obuna bo'ling!", show_alert=True)
+        await callback.message.answer(
+            "📢 <b>Kino ko'rish uchun kanallarga obuna bo'ling:</b>\n\n"
+            "Obuna bo'lgach, <b>✅ Tekshirish</b> tugmasini bosing.",
+            reply_markup=channels_kb(not_subscribed)
+        )
+        return
 
     code = callback.data.split(":")[1]
+
+    # Input validation
+    if not code.isdigit() or len(code) > MAX_MOVIE_CODE_LENGTH:
+        await callback.answer("❌ Noto'g'ri kod!", show_alert=True)
+        return
 
     movie = await get_movie_by_code_db(code)
 
@@ -839,8 +881,7 @@ async def movie_callback(callback: CallbackQuery, db_user: User = None, bot: Bot
     await callback.answer()
 
     try:
-        bot_info = await bot.me()
-        bot_link = f"https://t.me/{bot_info.username}"
+        bot_link = await get_bot_link(bot)
 
         desc = f"\n📖 {movie.description}" if movie.description else ""
         year_text = f" • 📅 {movie.year}" if movie.year else ""
@@ -859,7 +900,8 @@ async def movie_callback(callback: CallbackQuery, db_user: User = None, bot: Bot
         await increment_movie_views(movie.id)
         if db_user:
             await increment_user_movies(db_user.user_id)
-    except TelegramBadRequest:
+    except TelegramBadRequest as e:
+        logger.error(f"Kino callback yuborishda xatolik (code={code}): {e}")
         await callback.message.answer("❌ Xatolik.", reply_markup=back_kb())
 
 
@@ -1048,8 +1090,6 @@ async def flash_tariff_callback(callback: CallbackQuery, db_user: User = None):
 @sync_to_async
 def _save_pending_payment_for_flash(user_id: int, tariff_id: int, amount: int, with_discount: bool):
     """Flash sale uchun pending to'lovni saqlash"""
-    _PENDING_PAYMENT_TIMEOUT = 1800  # 30 daqiqa
-
     # Eski sessiyalarni tozalash
     PendingPaymentSession.cleanup_expired()
 
@@ -1059,7 +1099,7 @@ def _save_pending_payment_for_flash(user_id: int, tariff_id: int, amount: int, w
         PendingPaymentSession.objects.filter(user=user).delete()
 
         # Yangi sessiya yaratish
-        expires_at = dj_timezone.now() + timedelta(seconds=_PENDING_PAYMENT_TIMEOUT)
+        expires_at = dj_timezone.now() + timedelta(seconds=PENDING_PAYMENT_TIMEOUT)
         PendingPaymentSession.objects.create(
             user=user,
             tariff_id=tariff_id,
@@ -1069,7 +1109,7 @@ def _save_pending_payment_for_flash(user_id: int, tariff_id: int, amount: int, w
             expires_at=expires_at
         )
     except User.DoesNotExist:
-        pass
+        logger.warning(f"Flash sale pending payment: user topilmadi {user_id}")
 
 
 # ==================== PROFIL ====================
@@ -1203,18 +1243,23 @@ async def save_movie_callback(callback: CallbackQuery, db_user: User = None):
         return
 
     movie_code = callback.data.split(":")[1]
+
+    # Input validation
+    if not movie_code.isdigit() or len(movie_code) > MAX_MOVIE_CODE_LENGTH:
+        await callback.answer("❌ Noto'g'ri kod!", show_alert=True)
+        return
+
     result = await save_movie_to_favorites(db_user.user_id, movie_code)
 
     if result:
         await callback.answer("❤️ Kino saqlandi!", show_alert=True)
         # Tugmani yangilash
         try:
-            # Xabar turini aniqlash va qayta yuborish
             await callback.message.edit_reply_markup(
                 reply_markup=movie_action_kb(movie_code, is_saved=True)
             )
-        except:
-            pass
+        except TelegramBadRequest as e:
+            logger.debug(f"Tugmani yangilashda xatolik: {e}")
     else:
         await callback.answer("❌ Xatolik yoki allaqachon saqlangan!", show_alert=True)
 
@@ -1227,6 +1272,12 @@ async def unsave_movie_callback(callback: CallbackQuery, db_user: User = None):
         return
 
     movie_code = callback.data.split(":")[1]
+
+    # Input validation
+    if not movie_code.isdigit() or len(movie_code) > MAX_MOVIE_CODE_LENGTH:
+        await callback.answer("❌ Noto'g'ri kod!", show_alert=True)
+        return
+
     result = await remove_movie_from_favorites(db_user.user_id, movie_code)
 
     if result:
@@ -1236,8 +1287,8 @@ async def unsave_movie_callback(callback: CallbackQuery, db_user: User = None):
             await callback.message.edit_reply_markup(
                 reply_markup=movie_action_kb(movie_code, is_saved=False)
             )
-        except:
-            pass
+        except TelegramBadRequest as e:
+            logger.debug(f"Tugmani yangilashda xatolik: {e}")
     else:
         await callback.answer("❌ Xatolik!", show_alert=True)
 
@@ -1286,19 +1337,13 @@ async def saved_movie_callback(callback: CallbackQuery, db_user: User = None, bo
 @router.callback_query(F.data == "random_movie")
 async def random_movie_callback(callback: CallbackQuery, db_user: User = None, bot: Bot = None):
     """Random kino callback"""
-    from bot.middlewares.subscription import clear_subscription_cache
-
     user_id = callback.from_user.id
 
-    # Obunani tekshirish
-    if user_id not in settings.ADMINS:
-        if not db_user or not db_user.is_premium_active:
-            clear_subscription_cache(user_id)
-            not_subscribed = await check_subscription(bot, user_id)
-
-            if not_subscribed:
-                await callback.answer("❌ Avval kanallarga obuna bo'ling!", show_alert=True)
-                return
+    # Obunani tekshirish (helper funksiya orqali)
+    not_subscribed = await check_user_subscription(bot, user_id, db_user)
+    if not_subscribed:
+        await callback.answer("❌ Avval kanallarga obuna bo'ling!", show_alert=True)
+        return
 
     movie = await get_random_movie()
 
@@ -1313,8 +1358,7 @@ async def random_movie_callback(callback: CallbackQuery, db_user: User = None, b
     await callback.answer()
 
     try:
-        bot_info = await bot.me()
-        bot_link = f"https://t.me/{bot_info.username}"
+        bot_link = await get_bot_link(bot)
 
         desc = f"\n📖 {movie.description}" if movie.description else ""
         year_text = f" • 📅 {movie.year}" if movie.year else ""
@@ -1332,7 +1376,8 @@ async def random_movie_callback(callback: CallbackQuery, db_user: User = None, b
             reply_markup=movie_action_kb(movie.code, is_saved)
         )
         await increment_movie_views(movie.id)
-    except TelegramBadRequest:
+    except TelegramBadRequest as e:
+        logger.error(f"Random callback xatolik: {e}")
         await callback.message.answer("❌ Xatolik.", reply_markup=back_kb())
 
 
