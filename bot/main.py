@@ -6,7 +6,9 @@ import os
 # Ensure parent directory is in path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from aiogram.types import BotCommand, BotCommandScopeChat, BotCommandScopeDefault
+from aiogram import Router
+from aiogram.types import BotCommand, BotCommandScopeChat, BotCommandScopeDefault, ErrorEvent
+from aiogram.exceptions import TelegramNetworkError, TelegramRetryAfter, TelegramAPIError
 from django.conf import settings
 
 from bot.loader import bot, dp
@@ -77,6 +79,50 @@ async def on_shutdown():
     """Bot to'xtaganda"""
     logger.info("Bot to'xtadi!")
     await bot.session.close()
+
+
+# ==================== ERROR HANDLERS ====================
+
+@dp.error()
+async def error_handler(event: ErrorEvent):
+    """Global xato handler - barcha xatolarni ushlaydi"""
+    exception = event.exception
+    update = event.update
+
+    # TelegramNetworkError - tarmoq xatosi (Connection reset by peer)
+    if isinstance(exception, TelegramNetworkError):
+        logger.warning(
+            f"Tarmoq xatosi (TelegramNetworkError): {exception}. "
+            f"Update ID: {update.update_id if update else 'N/A'}"
+        )
+        # Bu xato avtomatik hal bo'ladi, hech narsa qilish shart emas
+        return True
+
+    # TelegramRetryAfter - flood limit
+    if isinstance(exception, TelegramRetryAfter):
+        logger.warning(
+            f"Flood limit: {exception.retry_after} soniya kutish kerak. "
+            f"Update ID: {update.update_id if update else 'N/A'}"
+        )
+        # Kutish va davom etish
+        await asyncio.sleep(exception.retry_after)
+        return True
+
+    # Boshqa TelegramAPIError xatolari
+    if isinstance(exception, TelegramAPIError):
+        logger.error(
+            f"Telegram API xatosi: {exception}. "
+            f"Update ID: {update.update_id if update else 'N/A'}"
+        )
+        return True
+
+    # Noma'lum xatolar - loglash
+    logger.exception(
+        f"Kutilmagan xato: {exception}. "
+        f"Update ID: {update.update_id if update else 'N/A'}",
+        exc_info=exception
+    )
+    return True
 
 
 async def main():

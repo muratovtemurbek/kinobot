@@ -1,8 +1,14 @@
 from datetime import datetime
 from typing import Optional
+import asyncio
+import logging
+
 from apps.users.models import User
 from apps.channels.models import Channel
 from asgiref.sync import sync_to_async
+from aiogram.exceptions import TelegramNetworkError, TelegramRetryAfter
+
+logger = logging.getLogger(__name__)
 
 
 @sync_to_async
@@ -131,3 +137,43 @@ def get_channel_subscription_count(channel_pk: int) -> int:
     """Kanal obunachilari sonini olish"""
     from apps.channels.models import ChannelSubscription
     return ChannelSubscription.objects.filter(channel_id=channel_pk).count()
+
+
+async def safe_execute(coro, max_retries: int = 3, delay: float = 1.0):
+    """
+    Tarmoq xatolarida qayta urinish bilan xavfsiz bajarish.
+
+    Foydalanish:
+        await safe_execute(message.answer("Salom!"))
+        await safe_execute(callback.message.edit_text("Yangi matn"))
+
+    Args:
+        coro: Async coroutine (masalan, message.answer(...))
+        max_retries: Maksimal urinishlar soni (default: 3)
+        delay: Urinishlar orasidagi kutish (soniyalarda)
+
+    Returns:
+        Coroutine natijasi yoki None (agar barcha urinishlar muvaffaqiyatsiz bo'lsa)
+    """
+    last_exception = None
+
+    for attempt in range(max_retries):
+        try:
+            return await coro
+        except TelegramRetryAfter as e:
+            # Flood limit - belgilangan vaqt kutish
+            logger.warning(f"Flood limit: {e.retry_after}s kutish (urinish {attempt + 1}/{max_retries})")
+            await asyncio.sleep(e.retry_after)
+        except TelegramNetworkError as e:
+            # Tarmoq xatosi - qayta urinish
+            last_exception = e
+            logger.warning(f"Tarmoq xatosi: {e} (urinish {attempt + 1}/{max_retries})")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(delay * (attempt + 1))  # Exponential backoff
+        except Exception as e:
+            # Boshqa xatolar - qayta urinmaslik
+            logger.error(f"Xato: {e}")
+            raise
+
+    logger.error(f"Barcha urinishlar muvaffaqiyatsiz: {last_exception}")
+    return None
